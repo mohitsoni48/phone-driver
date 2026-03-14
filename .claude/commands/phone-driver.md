@@ -12,24 +12,34 @@ The user's task is: $ARGUMENTS
 
 ## CRITICAL RULES
 
-1. **ALL ADB commands go through `./scripts/adb-helpers.sh`** — never call bare `adb`.
-2. **To open ANY app, use `./scripts/adb-helpers.sh launch <name>`** — never visually search for apps.
-3. **Read your skill library FIRST** — decompose the task into steps and reuse any known skills.
-4. **Save every new skill** you learn so it can be replayed next time.
+1. **ALL commands go through `$PD`** (the helper script). Never call bare `adb`.
+2. **To open ANY app, use `$PD launch <name>`** — never visually search for apps.
+3. **Read your skill library FIRST** — decompose the task and reuse known skills.
+4. **Save every new skill** so it can be replayed next time.
 5. **Minimize tool calls.** Chain with `&&`. Target 1 Bash call per cycle.
 
-## Phase 0: Load Skill Library + Pre-Flight
+## Phase 0: Resolve Paths + Load Skills + Pre-Flight
 
-Run in **ONE Bash call**:
+**FIRST**, set the `PD` variable that points to the helper script. Run this **before anything else**:
 
 ```bash
-./scripts/adb-helpers.sh check && echo "=== Resolution ===" && ./scripts/adb-helpers.sh resolution && echo "=== DeviceKey ===" && ./scripts/adb-helpers.sh devicekey && echo "=== Skills ===" && ./scripts/adb-helpers.sh memory list-skills $(./scripts/adb-helpers.sh devicekey)
+PD=""; for p in "$HOME/.claude/phonedriver/scripts/adb-helpers.sh" "./scripts/adb-helpers.sh"; do [ -x "$p" ] && PD="$p" && break; done; if [ -z "$PD" ]; then echo "ERROR: PhoneDriver not installed. Run: curl -sL https://raw.githubusercontent.com/mohitsoni48/phone-driver/main/install.sh | bash"; else echo "PD=$PD"; fi
+```
+
+If `PD` is not found, tell the user to install PhoneDriver first.
+
+**THEN** load everything in one call using the resolved `$PD`:
+
+```bash
+$PD check && echo "=== Resolution ===" && $PD resolution && echo "=== DeviceKey ===" && $PD devicekey && echo "=== Skills ===" && $PD memory list-skills $($PD devicekey)
 ```
 
 This gives you:
 - Device connection status and resolution
 - Your **device key** (format: `Model__WIDTHxHEIGHT`) — needed for all memory operations
 - Your **complete skill library** — all known apps, screens, elements, tasks, and settings
+
+**IMPORTANT**: Use `$PD` for ALL subsequent commands in this session. Every example below uses `$PD` as shorthand for the resolved helper script path.
 
 ## Phase 1: Decompose and Plan
 
@@ -53,35 +63,29 @@ User says: "open punch and place a sell order"
 → You see skill `enable_scalper_mode` covers "launch punch → tap scalper_nav" → replay that prefix, then discover "place sell order" from the scalper_view screen (whose elements you already know)
 
 User says: "open chrome"
-→ You see chrome is a known app → just `./scripts/adb-helpers.sh launch chrome`, no task needed
+→ You see chrome is a known app → just `$PD launch chrome`, no task needed
 
 ### Executing a Known Task
 
 If a task has compiled commands for your device, get them:
 
 ```bash
-./scripts/adb-helpers.sh memory get-replay <task_id> <device_key> param1=value1
+$PD memory get-replay <task_id> <device_key> param1=value1
 ```
 
 If `REPLAY:` → pass the string **exactly as-is** to batchact (do NOT modify it):
 ```bash
-./scripts/adb-helpers.sh batchact "<exact_string_after_REPLAY:>"
+$PD batchact "<exact_string_after_REPLAY:>"
 ```
 
 If `NO_COMPILED` → compile first:
 ```bash
-./scripts/adb-helpers.sh memory compile-task <task_id> <device_key>
+$PD memory compile-task <task_id> <device_key>
 ```
 
 ### Using Known Screens Without a Task
 
-If no task exists but you know the app's screens and elements (from the skill library), you can act directly using stored bounds:
-
-```bash
-./scripts/adb-helpers.sh memory get-task <task_id> <device_key>
-```
-
-Or read screen elements from memory and compute taps from bounds. No UI dump needed for known elements.
+If no task exists but you know the app's screens and elements (from the skill library), you can act directly using stored bounds — no UI dump needed for known elements.
 
 ## Phase 2: Discover Unknown Steps
 
@@ -98,7 +102,7 @@ STEP_LOG:
 
 ### Launch App
 ```bash
-./scripts/adb-helpers.sh launch "<app>" && sleep 1.5 && ./scripts/adb-helpers.sh uidump --compact
+$PD launch "<app>" && sleep 1.5 && $PD uidump --compact
 ```
 
 ### Interact via UI Dump (Tier 2)
@@ -108,18 +112,18 @@ After each successful action, save what you learned:
 
 **Save element:**
 ```bash
-./scripts/adb-helpers.sh memory save-element-full <app> <screen> <element_name> '{"resource_id":"<rid>","text":"<text>","content_desc":"<desc>","class":"<class>","clickable":true,"bounds_by_device":{"<device_key>":[left,top,right,bottom]}}'
+$PD memory save-element-full <app> <screen> <element_name> '{"resource_id":"<rid>","text":"<text>","content_desc":"<desc>","class":"<class>","clickable":true,"bounds_by_device":{"<device_key>":[left,top,right,bottom]}}'
 ```
 
 **Save transition:**
 ```bash
-./scripts/adb-helpers.sh memory save-transition <app> <old_screen> "tap <element>" <new_screen>
+$PD memory save-transition <app> <old_screen> "tap <element>" <new_screen>
 ```
 
 ### Vision Fallback (Tier 3)
 Only if UI dump is empty:
 ```bash
-./scripts/adb-helpers.sh screenshot
+$PD screenshot
 ```
 Then: `Read /tmp/phonedriver_screen.png`
 
@@ -129,10 +133,10 @@ Parameterize dynamic values in your step log:
 
 ## Phase 3: Save New Skills
 
-After completing any task with NEW steps (Learn Mode), save the full sequence as a reusable skill:
+After completing any task with NEW steps, save the full sequence as a reusable skill:
 
 ```bash
-./scripts/adb-helpers.sh memory save-task "<task_id>" '{
+$PD memory save-task "<task_id>" '{
   "pattern": "<natural language with {params}>",
   "pattern_aliases": ["<alternative phrasings>"],
   "app": "<primary_app>",
@@ -147,19 +151,19 @@ After completing any task with NEW steps (Learn Mode), save the full sequence as
 
 Then compile for instant replay:
 ```bash
-./scripts/adb-helpers.sh memory compile-task "<task_id>" "<device_key>"
+$PD memory compile-task "<task_id>" "<device_key>"
 ```
 
 Save device info:
 ```bash
-./scripts/adb-helpers.sh memory save-device
+$PD memory save-device
 ```
 
-**If this task EXTENDS an existing skill** (e.g., "search in chrome" + "click first result"), save it as a NEW task with ALL steps (including the prefix). This way both the short and extended versions are available as separate skills.
+**If this task EXTENDS an existing skill**, save as a NEW task with ALL steps (including the prefix). Both short and extended versions remain available as separate skills.
 
 ### Naming Conventions
 
-- **task_id**: snake_case. E.g., `search_in_chrome`, `search_in_chrome_click_first_result`
+- **task_id**: snake_case. E.g., `search_in_chrome`, `search_in_chrome_click_first`
 - **screen names**: snake_case. E.g., `home`, `search_input`, `search_results`
 - **element names**: snake_case. E.g., `search_bar`, `first_result`, `wifi_toggle`
 - **pattern**: Natural language. E.g., `search for {query} in chrome and click first result`
@@ -176,7 +180,7 @@ New skills saved: [list]
 ## Batch Action DSL Reference
 
 ```bash
-./scripts/adb-helpers.sh batchact "launch chrome; waitfor search_box 10; tap 540 188; text 'hello'; key KEYCODE_ENTER"
+$PD batchact "launch chrome; waitfor search_box 10; tap 540 188; text 'hello'; key KEYCODE_ENTER"
 ```
 
 | Command | What it does |

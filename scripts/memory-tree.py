@@ -25,7 +25,10 @@ from copy import deepcopy
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-MEMORY_FILE = SCRIPT_DIR / ".." / ".claude" / "commands" / "phonedriver-memory.json"
+PD_HOME = Path.home() / ".claude" / "phonedriver"
+_INSTALLED_MEMORY = PD_HOME / "memory.json"
+_REPO_MEMORY = SCRIPT_DIR / ".." / ".claude" / "commands" / "phonedriver-memory.json"
+MEMORY_FILE = _INSTALLED_MEMORY if _INSTALLED_MEMORY.exists() else (_REPO_MEMORY if _REPO_MEMORY.exists() else _INSTALLED_MEMORY)
 
 
 def load_memory():

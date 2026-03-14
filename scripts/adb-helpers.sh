@@ -28,7 +28,16 @@ alias adb="$ADB" 2>/dev/null || true
 SCREENSHOT_DEFAULT="/tmp/phonedriver_screen.png"
 UIDUMP_PATH="/tmp/phonedriver_ui.xml"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MEMORY_FILE="$SCRIPT_DIR/../.claude/commands/phonedriver-memory.json"
+PD_HOME="$HOME/.claude/phonedriver"
+
+# Memory file: prefer installed location, fall back to repo location
+if [ -f "$PD_HOME/memory.json" ]; then
+    MEMORY_FILE="$PD_HOME/memory.json"
+elif [ -f "$SCRIPT_DIR/../.claude/commands/phonedriver-memory.json" ]; then
+    MEMORY_FILE="$SCRIPT_DIR/../.claude/commands/phonedriver-memory.json"
+else
+    MEMORY_FILE="$PD_HOME/memory.json"
+fi
 MEMORY_TREE="$SCRIPT_DIR/memory-tree.py"
 
 # ── JSON helpers (jq preferred, python3 fallback) ──────────────────────

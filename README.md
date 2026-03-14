@@ -1,6 +1,6 @@
 # Phone Driver
 
-A Claude Code skill that automates Android devices using visual understanding and ADB. Describe a task in natural language and Claude will execute it by analyzing screenshots and performing touch actions.
+An AI-powered Claude Code skill that automates Android devices. Describe a task in natural language and Claude will execute it — learning from each interaction to replay tasks instantly next time.
 
 <p align="center">
   <img src="Images/PhoneDriver.png" width="600" alt="Phone Driver Demo">
@@ -8,18 +8,45 @@ A Claude Code skill that automates Android devices using visual understanding an
 
 ## Features
 
-- **Zero dependencies** — No Python, no GPU, no model downloads. Just ADB.
-- **Natural language tasks** — Describe what you want in plain English
-- **Visual understanding** — Claude analyzes phone screenshots to understand UI elements
-- **ADB integration** — Controls Android devices via tap, swipe, type, and key events
-- **Smart app launching** — Uses Android intents to open apps directly
+- **Zero dependencies** — No Python ML libraries, no GPU, no model downloads. Just ADB + Claude Code.
+- **Skill learning** — First time discovering, every time after instant replay
+- **Tree-structured memory** — Learns app screens, element locations, and task recipes
+- **Multi-device support** — Same skills work across devices, coordinates adapt per device
+- **Natural language** — Describe what you want, Claude figures out how
 - **Safety built-in** — Refuses destructive actions unless explicitly requested
 
-## Requirements
+## Install
 
-- [Claude Code](https://claude.ai/code) CLI installed
-- ADB (Android Debug Bridge) installed and on PATH
+### One-line installer (recommended)
+
+```bash
+curl -sL https://raw.githubusercontent.com/mohitsoni48/phone-driver/main/install.sh | bash
+```
+
+### From source
+
+```bash
+git clone https://github.com/mohitsoni48/phone-driver.git
+cd PhoneDriver
+./install.sh
+```
+
+### What gets installed
+
+```
+~/.claude/commands/phone-driver.md     ← The skill (Claude Code command)
+~/.claude/phonedriver/
+├── scripts/adb-helpers.sh             ← ADB helpers + batch actions
+├── scripts/memory-tree.py             ← Skill tree operations
+└── memory.json                        ← Learned skills (persists across updates)
+```
+
+## Prerequisites
+
+- [Claude Code](https://claude.ai/code) CLI
+- ADB (Android Debug Bridge) on PATH
 - Android device with USB debugging enabled
+- Python 3 (for memory operations)
 
 ### Install ADB
 
@@ -28,110 +55,78 @@ A Claude Code skill that automates Android devices using visual understanding an
 brew install android-platform-tools
 ```
 
-**Linux/Ubuntu:**
+**Linux:**
 ```bash
-sudo apt update && sudo apt install adb
+sudo apt install adb
 ```
 
-**Windows:**
-Download from [Android SDK Platform-Tools](https://developer.android.com/tools/releases/platform-tools)
+### Connect your device
 
-## Installation
-
-### Option 1: Per-Project (clone this repo)
-
-```bash
-git clone https://github.com/OminousIndustries/PhoneDriver.git
-cd PhoneDriver
-```
-
-The command is already at `.claude/commands/phone-driver.md` — it works automatically when you run Claude Code from this directory.
-
-### Option 2: Global Install (any project)
-
-```bash
-# Download just the command file
-mkdir -p ~/.claude/commands
-curl -o ~/.claude/commands/phone-driver.md \
-  https://raw.githubusercontent.com/OminousIndustries/PhoneDriver/main/.claude/commands/phone-driver.md
-```
-
-Now `/phone-driver` works from any project directory.
-
-## Setup
-
-1. Enable USB debugging on your Android device:
-   - Go to **Settings → About Phone**
-   - Tap **Build Number** 7 times to enable Developer Options
-   - Go to **Settings → Developer Options → USB Debugging** and enable it
-
-2. Connect your device via USB
-
-3. Verify connection:
-   ```bash
-   adb devices
-   ```
-   You should see your device listed as `device` (not `unauthorized`).
+1. Enable USB debugging: **Settings → Developer Options → USB Debugging**
+2. Connect via USB
+3. Verify: `adb devices` (should show your device as `device`)
 
 ## Usage
 
-In Claude Code, invoke the command with a task description:
+In Claude Code:
 
 ```
-/phone-driver "open Chrome"
-/phone-driver "search for weather in New York on Google"
+/phone-driver "open Chrome and search for weather"
 /phone-driver "open Settings and enable WiFi"
-/phone-driver "open the Calculator and compute 123 + 456"
-/phone-driver "take a screenshot of the home screen"
-/phone-driver "open Camera"
+/phone-driver "open Calculator and compute 123 + 456"
+/phone-driver "open YouTube"
 ```
 
-### What Happens
+### How it works
 
-1. Claude verifies your device is connected and detects its screen resolution
-2. Captures a screenshot from the device
-3. Analyzes the screenshot using its built-in vision
-4. Determines the best action (tap, swipe, type text, press button)
-5. Executes the action via ADB
-6. Captures a new screenshot to verify the result
-7. Repeats until the task is complete (max 15 cycles)
+**First time** (Learn Mode):
+1. Launches app via intent (instant)
+2. Discovers screens and elements via UI dump
+3. Executes actions (tap, type, swipe)
+4. Saves everything to the skill tree
+5. Compiles task recipe for instant replay
 
-## How It Works
+**Second time** (Replay Mode):
+1. Reads skill library → finds matching task
+2. Executes entire sequence in ONE batch call
+3. No UI dumps, no screenshots, no trial and error
 
-Unlike traditional phone automation tools that require scripting specific coordinates or element IDs, Phone Driver uses Claude's multimodal vision to understand what's on screen — just like a human would. It sees buttons, text, icons, and menus, then figures out what to tap or type to accomplish your task.
+**Partial match**:
+If you ask "search for weather in Chrome and click first result" and it only knows "search for weather in Chrome", it replays the known prefix and only discovers the new "click first result" part.
 
-The entire skill is a single markdown file (`.claude/commands/phone-driver.md`) that instructs Claude how to:
-- Capture and analyze screenshots
-- Estimate tap coordinates from visual element positions
-- Execute ADB commands for device interaction
-- Track action history to avoid loops
-- Handle errors and retry with alternative approaches
+## How the skill tree works
 
-## Troubleshooting
+PhoneDriver builds a tree of everything it learns:
 
-**Device not detected:**
-- Ensure USB debugging is enabled
-- Accept the authorization prompt on the phone
-- Try `adb kill-server && adb start-server`
+```
+Apps
+├── chrome (package, intent, aliases)
+│   └── Screens
+│       ├── home → elements: [search_bar, menu_button]
+│       ├── search_input → elements: [url_bar_focused]
+│       └── search_results → elements: [first_result]
+│
+Tasks (replayable recipes)
+├── search_in_chrome: "search for {query} in chrome"
+│   steps: launch → tap search_bar → type {query} → press ENTER
+│   compiled: "launch chrome; waitfor search_box 10; tap 540 188; ..."
+│
+Settings Shortcuts
+├── wifi → android.settings.WIFI_SETTINGS
+├── bluetooth → android.settings.BLUETOOTH_SETTINGS
+└── ...
+```
 
-**Wrong tap locations:**
-- Claude auto-detects resolution via `adb shell wm size`
-- If taps are off, the device may have a different DPI or display scaling
+- **Element locations** are stored per-device (same skill works on any phone)
+- **Tasks** are parameterized (e.g., `{query}` → reusable with any search term)
+- **Memory persists** across updates (install won't overwrite learned skills)
 
-**App not launching:**
-- Some apps have non-standard package names
-- Claude will try `adb shell pm list packages | grep <keyword>` to find the correct package
+## Uninstall
 
-## Comparison: Before vs After
-
-| | Original (Python + Qwen3-VL) | New (Claude Code Skill) |
-|---|---|---|
-| **Dependencies** | Python, torch, transformers, PIL, gradio | Just ADB |
-| **GPU** | 24GB+ VRAM required | None |
-| **Model download** | ~16GB model weights | None |
-| **Setup time** | 30+ minutes | 2 minutes |
-| **Interface** | Gradio web UI or CLI | Claude Code (terminal) |
-| **Vision model** | Qwen3-VL (local) | Claude (cloud) |
+```bash
+rm ~/.claude/commands/phone-driver.md
+rm -rf ~/.claude/phonedriver
+```
 
 ## License
 
@@ -141,4 +136,4 @@ Apache License 2.0 — see [LICENSE](LICENSE) file for details.
 
 - Powered by [Claude Code](https://claude.ai/code) by Anthropic
 - Uses [ADB](https://developer.android.com/tools/adb) for device communication
-- Original concept inspired by [Qwen3-VL](https://github.com/QwenLM/Qwen-VL) by Alibaba Cloud
+- Original vision model concept inspired by [Qwen3-VL](https://github.com/QwenLM/Qwen-VL)
