@@ -61,6 +61,340 @@ def bounds_center(bounds):
     return ((bounds[0] + bounds[2]) // 2, (bounds[1] + bounds[3]) // 2)
 
 
+# ── Screen Identity (structural, ignores dynamic text) ────────────────
+
+def _structural_signature(xml_path):
+    """
+    Generate a screen fingerprint based on STRUCTURE, not content.
+    Uses: resource-ids, class names, element hierarchy.
+    Ignores: text content (prices, timestamps change every second).
+    """
+    import hashlib
+    tree = ET.parse(xml_path)
+    root = tree.getroot()
+    sig_parts = []
+    for node in root.iter("node"):
+        rid = node.get("resource-id", "")
+        cls = node.get("class", "")
+        clickable = node.get("clickable", "false")
+        desc = node.get("content-desc", "")
+        # Use resource-id (most stable), class, clickable, content-desc
+        # Skip text entirely — it contains dynamic values
+        if rid or (clickable == "true") or desc:
+            sig_parts.append(f"{rid}|{cls}|{clickable}|{desc}")
+    return hashlib.md5("::".join(sorted(sig_parts)).encode()).hexdigest()[:16]
+
+
+def _extract_screen_elements(xml_path):
+    """Extract all meaningful elements from a UI dump XML."""
+    tree = ET.parse(xml_path)
+    root = tree.getroot()
+    elements = {}
+    for node in root.iter("node"):
+        text = node.get("text", "")
+        desc = node.get("content-desc", "")
+        rid = node.get("resource-id", "")
+        bounds_str = node.get("bounds", "")
+        clickable = node.get("clickable", "false")
+
+        label = text or desc or (rid.split("/")[-1] if rid else "")
+        if not label:
+            continue
+        if clickable != "true" and not text and not desc:
+            continue
+
+        bounds = parse_bounds_str(bounds_str)
+        if not bounds:
+            continue
+
+        # Name key: prefer resource-id (stable), fallback to desc, then text
+        if rid:
+            ename = rid.split("/")[-1] if "/" in rid else rid
+        elif desc:
+            ename = desc
+        else:
+            ename = text
+
+        ename = re.sub(r"[^a-zA-Z0-9_]", "_", ename.lower().strip())[:40]
+        if not ename or ename == "_":
+            continue
+
+        elements[ename] = {
+            "resource_id": rid,
+            "text": text,
+            "content_desc": desc,
+            "clickable": clickable == "true",
+            "bounds": bounds,
+        }
+    return elements
+
+
+def _detect_app_package(xml_path):
+    """Detect the foreground app package from UI dump."""
+    tree = ET.parse(xml_path)
+    root = tree.getroot()
+    for node in root.iter("node"):
+        pkg = node.get("package", "")
+        if pkg and pkg != "com.android.systemui":
+            return pkg
+    return ""
+
+
+def _find_screen_by_signature(app_data, signature):
+    """Find an existing screen in memory that matches this signature."""
+    for sname, sdata in app_data.get("screens", {}).items():
+        if sdata.get("identifiers", {}).get("signature") == signature:
+            return sname
+    return None
+
+
+def _auto_name_screen(app_data, elements):
+    """Generate a screen name from its distinctive resource-ids."""
+    # Use resource-ids first (most stable), then content-descs
+    rids = [el.get("resource_id", "").split("/")[-1] for el in elements.values()
+            if el.get("resource_id")]
+    descs = [el.get("content_desc", "") for el in elements.values()
+             if el.get("content_desc")]
+
+    candidates = rids[:3] or descs[:3] or list(elements.keys())[:3]
+    name = "_".join(re.sub(r"[^a-zA-Z0-9]", "_", c.lower())[:15] for c in candidates if c)
+    if not name:
+        name = "screen"
+
+    # Ensure unique
+    existing = set(app_data.get("screens", {}).keys())
+    if name not in existing:
+        return name[:30]
+    for i in range(2, 100):
+        candidate = f"{name}_{i}"[:30]
+        if candidate not in existing:
+            return candidate
+    return name[:30]
+
+
+def _merge_screen_elements(screen_data, new_elements, device_key):
+    """Merge new elements into an existing screen, updating bounds per device."""
+    stored = screen_data.setdefault("elements", {})
+    saved = 0
+    updated = 0
+    for ename, el in new_elements.items():
+        if ename not in stored:
+            stored[ename] = {
+                "resource_id": el["resource_id"],
+                "text": el["text"],
+                "content_desc": el["content_desc"],
+                "clickable": el["clickable"],
+                "bounds_by_device": {device_key: el["bounds"]},
+            }
+            saved += 1
+        else:
+            stored[ename].setdefault("bounds_by_device", {})[device_key] = el["bounds"]
+            updated += 1
+    return saved, updated
+
+
+# ── Tap and Memo (find element, tap, auto-memoize) ────────────────────
+
+def cmd_tap_and_memo(xml_before_path, xml_after_path, query, device_key, index=0):
+    """
+    Core memoization logic called after a tap.
+    - Identifies before/after screens by structural signature
+    - Merges elements into existing screens (or creates new ones)
+    - Records transitions if screen changed
+    """
+    data = load_memory()
+
+    before_sig = _structural_signature(xml_before_path)
+    after_sig = _structural_signature(xml_after_path)
+    screen_changed = before_sig != after_sig
+
+    before_elements = _extract_screen_elements(xml_before_path)
+    after_elements = _extract_screen_elements(xml_after_path)
+
+    before_pkg = _detect_app_package(xml_before_path)
+    after_pkg = _detect_app_package(xml_after_path)
+
+    # Find app in memory by package
+    app_name = ""
+    for name, app in data.get("apps", {}).items():
+        if app.get("package") in (before_pkg, after_pkg):
+            app_name = name
+            break
+
+    if not app_name:
+        if screen_changed:
+            print(f"MEMO_SKIP: app package {before_pkg} not in memory")
+        return
+
+    app = data["apps"][app_name]
+    screens = app.setdefault("screens", {})
+
+    # Find or create BEFORE screen
+    before_screen = _find_screen_by_signature(app, before_sig)
+    if not before_screen:
+        before_screen = _auto_name_screen(app, before_elements)
+    screen_before_data = screens.setdefault(before_screen, {"identifiers": {}, "elements": {}, "transitions": {}})
+    screen_before_data["identifiers"]["signature"] = before_sig
+    saved_b, updated_b = _merge_screen_elements(screen_before_data, before_elements, device_key)
+
+    if screen_changed:
+        # Find or create AFTER screen
+        after_screen = _find_screen_by_signature(app, after_sig)
+        if not after_screen:
+            after_screen = _auto_name_screen(app, after_elements)
+        screen_after_data = screens.setdefault(after_screen, {"identifiers": {}, "elements": {}, "transitions": {}})
+        screen_after_data["identifiers"]["signature"] = after_sig
+        saved_a, updated_a = _merge_screen_elements(screen_after_data, after_elements, device_key)
+
+        # Save transition
+        tap_label = re.sub(r"[^a-zA-Z0-9_]", "_", query.lower().strip())[:30]
+        screen_before_data.setdefault("transitions", {})[f"tap {tap_label}"] = after_screen
+
+        save_memory(data)
+        print(f"MEMO: {app_name}/{before_screen} →tap \"{query}\"→ {app_name}/{after_screen} (before:{saved_b}new+{updated_b}upd, after:{saved_a}new+{updated_a}upd)")
+    else:
+        save_memory(data)
+        if saved_b > 0:
+            print(f"MEMO: {saved_b} new elements on {app_name}/{before_screen}")
+
+
+def cmd_cleanup_screens():
+    """
+    Deduplicate screens that have the same structural signature.
+    Merges elements and transitions from duplicates into the canonical screen.
+    """
+    data = load_memory()
+    total_merged = 0
+
+    for app_name, app in data.get("apps", {}).items():
+        screens = app.get("screens", {})
+        if not screens:
+            continue
+
+        # Group by signature
+        sig_groups = {}
+        for sname, sdata in screens.items():
+            sig = sdata.get("identifiers", {}).get("signature", sname)
+            sig_groups.setdefault(sig, []).append(sname)
+
+        # Merge duplicates
+        to_delete = []
+        for sig, names in sig_groups.items():
+            if len(names) <= 1:
+                continue
+
+            # Keep the first one (or the shortest name) as canonical
+            canonical = min(names, key=len)
+            canonical_data = screens[canonical]
+
+            for dup_name in names:
+                if dup_name == canonical:
+                    continue
+                dup_data = screens[dup_name]
+
+                # Merge elements
+                for ename, el in dup_data.get("elements", {}).items():
+                    canon_els = canonical_data.setdefault("elements", {})
+                    if ename not in canon_els:
+                        canon_els[ename] = el
+                    else:
+                        # Merge bounds
+                        for dev, bounds in el.get("bounds_by_device", {}).items():
+                            canon_els[ename].setdefault("bounds_by_device", {})[dev] = bounds
+
+                # Merge transitions
+                for action, target in dup_data.get("transitions", {}).items():
+                    canonical_data.setdefault("transitions", {})[action] = target
+
+                # Update any transitions pointing TO this duplicate
+                for sn, sd in screens.items():
+                    for action, target in sd.get("transitions", {}).items():
+                        if target == dup_name:
+                            sd["transitions"][action] = canonical
+
+                to_delete.append(dup_name)
+                total_merged += 1
+
+        for d in to_delete:
+            del screens[d]
+
+    if total_merged > 0:
+        save_memory(data)
+        print(f"CLEANUP: Merged {total_merged} duplicate screens")
+    else:
+        print("CLEANUP: No duplicates found")
+
+
+# ── Find and Tap (element search in UI dump) ──────────────────────────
+
+def cmd_find_and_tap(xml_path, query, index=0):
+    """Find an element in a UI dump by text/desc/rid and return tap coordinates."""
+    tree = ET.parse(xml_path)
+    root = tree.getroot()
+    query_lower = query.lower()
+    index = int(index)
+    matches = []
+
+    for node in root.iter("node"):
+        text = node.get("text", "")
+        desc = node.get("content-desc", "")
+        rid = node.get("resource-id", "")
+        bounds_str = node.get("bounds", "")
+
+        if not bounds_str:
+            continue
+
+        bounds = parse_bounds_str(bounds_str)
+        if not bounds:
+            continue
+
+        cx, cy = bounds_center(bounds)
+
+        matched = False
+        match_on = ""
+        # Exact matches
+        if text.lower() == query_lower:
+            matched, match_on = True, f'text="{text}"'
+        elif desc.lower() == query_lower:
+            matched, match_on = True, f'content-desc="{desc}"'
+        elif rid.lower() == query_lower or rid.lower().endswith("/" + query_lower) or rid.lower().endswith(":id/" + query_lower):
+            matched, match_on = True, f'resource-id="{rid}"'
+        # Partial matches
+        elif query_lower in text.lower():
+            matched, match_on = True, f'text="{text}" (partial)'
+        elif query_lower in desc.lower():
+            matched, match_on = True, f'content-desc="{desc}" (partial)'
+        elif query_lower in rid.lower():
+            matched, match_on = True, f'resource-id="{rid}" (partial)'
+
+        if matched:
+            matches.append((cx, cy, match_on, bounds_str, text or desc or rid))
+
+    if not matches:
+        print(f'NOT_FOUND: No element matching "{query}"')
+        hints = []
+        for node in root.iter("node"):
+            t = node.get("text", "")
+            d = node.get("content-desc", "")
+            r = node.get("resource-id", "")
+            c = node.get("clickable", "false")
+            label = t or d or (r.split("/")[-1] if r else "")
+            if label and c == "true":
+                hints.append(label)
+        if hints:
+            print(f'HINT: Available elements: {", ".join(hints[:15])}')
+        sys.exit(1)
+
+    if index >= len(matches):
+        index = 0
+
+    cx, cy, match_on, bounds_str, label = matches[index]
+    print(f"TAPPED: {cx} {cy} ({match_on}) bounds={bounds_str}")
+    if len(matches) > 1:
+        print(f"NOTE: {len(matches)} matches found, tapped index {index}")
+    print(f"TAP_COORDS: {cx} {cy}")
+
+
 # ── Migration ──────────────────────────────────────────────────────────
 
 def cmd_migrate():
@@ -721,6 +1055,13 @@ def main():
         cmd_list_skills(sys.argv[2] if len(sys.argv) > 2 else None)
     elif cmd == "save-correction":
         cmd_save_correction(sys.argv[2], sys.argv[3], sys.argv[4])
+    elif cmd == "find-and-tap":
+        cmd_find_and_tap(sys.argv[2], sys.argv[3], sys.argv[4] if len(sys.argv) > 4 else 0)
+    elif cmd == "tap-memo":
+        cmd_tap_and_memo(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5],
+                         int(sys.argv[6]) if len(sys.argv) > 6 else 0)
+    elif cmd == "cleanup-screens":
+        cmd_cleanup_screens()
     else:
         print(f"Unknown command: {cmd}")
         sys.exit(1)
