@@ -41,11 +41,20 @@ else
 fi
 MEMORY_TREE="$SCRIPT_DIR/memory-tree.py"
 
-# If a device session is locked, use that device for ALL commands
+# Device session: if locked, all commands target that device
+_LOCKED_DEVICE=""
 if [ -f "$DEVICE_SESSION_FILE" ]; then
     _LOCKED_DEVICE=$(cat "$DEVICE_SESSION_FILE")
-    ADB="$ADB -s $_LOCKED_DEVICE"
 fi
+
+# ADB wrapper that handles device targeting with proper quoting
+adb_cmd() {
+    if [ -n "$_LOCKED_DEVICE" ]; then
+        "$ADB" -s "$_LOCKED_DEVICE" "$@"
+    else
+        "$ADB" "$@"
+    fi
+}
 
 # ── JSON helpers (jq preferred, python3 fallback) ──────────────────────
 
@@ -127,16 +136,15 @@ check_device() {
         still_connected=$("$adb_base" devices 2>/dev/null | grep "$locked_id" | grep -w "device" || true)
         if [ -n "$still_connected" ]; then
             local model
-            model=$($ADB shell getprop ro.product.model 2>/dev/null | tr -d '\r')
+            model=$(adb_cmd shell getprop ro.product.model 2>/dev/null | tr -d '\r')
             local android_version
-            android_version=$($ADB shell getprop ro.build.version.release 2>/dev/null | tr -d '\r')
+            android_version=$(adb_cmd shell getprop ro.build.version.release 2>/dev/null | tr -d '\r')
             echo "OK: Locked to $model (Android $android_version) [$locked_id]"
             return 0
         else
             echo "WARNING: Previously locked device $locked_id is no longer connected. Re-selecting..."
             rm -f "$DEVICE_SESSION_FILE"
-            # Reset ADB to base (remove stale -s flag)
-            ADB="$adb_base"
+            _LOCKED_DEVICE=""
         fi
     fi
 
@@ -159,14 +167,14 @@ check_device() {
 
     if [ "$count" -eq 1 ]; then
         local device_id
-        device_id=$(echo "$devices" | head -1 | awk '{print $1}')
+        device_id=$(echo "$devices" | head -1 | awk -F'\t' '{print $1}')
         # Lock to this device
         echo "$device_id" > "$DEVICE_SESSION_FILE"
-        ADB="$adb_base -s $device_id"
+        _LOCKED_DEVICE="$device_id"
         local model
-        model=$($ADB shell getprop ro.product.model 2>/dev/null | tr -d '\r')
+        model=$(adb_cmd shell getprop ro.product.model 2>/dev/null | tr -d '\r')
         local android_version
-        android_version=$($ADB shell getprop ro.build.version.release 2>/dev/null | tr -d '\r')
+        android_version=$(adb_cmd shell getprop ro.build.version.release 2>/dev/null | tr -d '\r')
         echo "OK: Locked to $model (Android $android_version) [$device_id]"
         return 0
     fi
@@ -176,9 +184,9 @@ check_device() {
     local i=1
     while IFS= read -r line; do
         local did
-        did=$(echo "$line" | awk '{print $1}')
+        did=$(echo "$line" | awk -F'\t' '{print $1}')
         local dmodel
-        dmodel=$("$adb_base" -s "$did" shell getprop ro.product.model 2>/dev/null | tr -d '\r')
+        dmodel=$("$adb_base" -s "$did" shell getprop ro.product.model 2>/dev/null | tr -d '\r' || echo "unknown")
         echo "  $i) $dmodel [$did]"
         i=$((i + 1))
     done <<< "$devices"
@@ -206,9 +214,9 @@ select_device() {
     fi
 
     echo "$device_id" > "$DEVICE_SESSION_FILE"
-    ADB="$adb_base -s $device_id"
+    _LOCKED_DEVICE="$device_id"
     local model
-    model=$($ADB shell getprop ro.product.model 2>/dev/null | tr -d '\r')
+    model=$(adb_cmd shell getprop ro.product.model 2>/dev/null | tr -d '\r')
     echo "OK: Locked to $model [$device_id] for this session."
     echo "All commands will target this device until you run '$0 release-device'."
 }
@@ -220,7 +228,7 @@ release_device() {
 
 get_resolution() {
     local output
-    output=$($ADB shell wm size 2>/dev/null | tr -d '\r')
+    output=$(adb_cmd shell wm size 2>/dev/null | tr -d '\r')
 
     if echo "$output" | grep -q "Physical size:"; then
         echo "$output" | grep "Physical size:" | sed 's/Physical size: //'
@@ -234,9 +242,9 @@ get_resolution() {
 
 capture_screenshot() {
     local output_path="${1:-$SCREENSHOT_DEFAULT}"
-    $ADB shell screencap -p /sdcard/phonedriver_screen.png
-    $ADB pull /sdcard/phonedriver_screen.png "$output_path" > /dev/null 2>&1
-    $ADB shell rm /sdcard/phonedriver_screen.png
+    adb_cmd shell screencap -p /sdcard/phonedriver_screen.png
+    adb_cmd pull /sdcard/phonedriver_screen.png "$output_path" > /dev/null 2>&1
+    adb_cmd shell rm /sdcard/phonedriver_screen.png
     echo "$output_path"
 }
 
@@ -245,9 +253,9 @@ capture_screenshot() {
 ui_dump() {
     local compact="${1:-}"
 
-    $ADB shell uiautomator dump /sdcard/phonedriver_ui.xml > /dev/null 2>&1
-    $ADB pull /sdcard/phonedriver_ui.xml "$UIDUMP_PATH" > /dev/null 2>&1
-    $ADB shell rm /sdcard/phonedriver_ui.xml 2>/dev/null
+    adb_cmd shell uiautomator dump /sdcard/phonedriver_ui.xml > /dev/null 2>&1
+    adb_cmd pull /sdcard/phonedriver_ui.xml "$UIDUMP_PATH" > /dev/null 2>&1
+    adb_cmd shell rm /sdcard/phonedriver_ui.xml 2>/dev/null
 
     if [ ! -f "$UIDUMP_PATH" ]; then
         echo "ERROR: UI dump failed. Screen may be locked or in transition."
@@ -309,7 +317,7 @@ app_info() {
 
     # Search both third-party and system packages
     local packages
-    packages=$($ADB shell pm list packages 2>/dev/null | tr -d '\r' | sed 's/package://' | grep -i "$keyword" || true)
+    packages=$(adb_cmd shell pm list packages 2>/dev/null | tr -d '\r' | sed 's/package://' | grep -i "$keyword" || true)
 
     if [ -z "$packages" ]; then
         echo "NOT_FOUND: No packages matching '$keyword'"
@@ -319,7 +327,7 @@ app_info() {
     while IFS= read -r pkg; do
         # Extract main launcher activity
         local activity
-        activity=$($ADB shell cmd package resolve-activity --brief -c android.intent.category.LAUNCHER "$pkg" 2>/dev/null | tr -d '\r' | tail -1 || true)
+        activity=$(adb_cmd shell cmd package resolve-activity --brief -c android.intent.category.LAUNCHER "$pkg" 2>/dev/null | tr -d '\r' | tail -1 || true)
 
         if [ -n "$activity" ] && [ "$activity" != "No activity found" ]; then
             echo "FOUND: package=$pkg activity=$activity intent=adb shell am start -n $activity"
@@ -366,11 +374,10 @@ sys.exit(1)
 
         if [ -n "$intent" ]; then
             echo "MEMORY_HIT: Launching from memory"
-            # The intent stored is like 'adb shell am start -n ...'
-            # Replace 'adb' with our resolved $ADB path
-            local cmd
-            cmd=$(echo "$intent" | sed "s|^adb |$ADB |")
-            eval "$cmd" 2>/dev/null
+            # Intent is like 'adb shell am start -n ...' — strip 'adb shell ' and run via adb_cmd
+            local shell_cmd
+            shell_cmd=$(echo "$intent" | sed 's/^adb shell //')
+            adb_cmd shell $shell_cmd 2>/dev/null
             local rc=$?
             if [ $rc -eq 0 ]; then
                 echo "LAUNCHED: $keyword (from memory)"
@@ -395,10 +402,8 @@ sys.exit(1)
     local pkg activity full_intent
     pkg=$(echo "$found_line" | sed 's/.*package=\([^ ]*\).*/\1/')
     activity=$(echo "$found_line" | sed 's/.*activity=\([^ ]*\).*/\1/')
-    full_intent="$ADB shell am start -n $activity"
-
     # Step 3: Launch
-    eval "$full_intent" 2>/dev/null
+    adb_cmd shell am start -n "$activity" 2>/dev/null
     local rc=$?
     if [ $rc -eq 0 ]; then
         echo "LAUNCHED: $keyword (discovered: $activity)"
@@ -440,9 +445,9 @@ tap_on() {
     fi
 
     # Capture fresh UI dump
-    $ADB shell uiautomator dump /sdcard/phonedriver_tap.xml > /dev/null 2>&1
-    $ADB pull /sdcard/phonedriver_tap.xml /tmp/phonedriver_tap.xml > /dev/null 2>&1
-    $ADB shell rm /sdcard/phonedriver_tap.xml 2>/dev/null
+    adb_cmd shell uiautomator dump /sdcard/phonedriver_tap.xml > /dev/null 2>&1
+    adb_cmd pull /sdcard/phonedriver_tap.xml /tmp/phonedriver_tap.xml > /dev/null 2>&1
+    adb_cmd shell rm /sdcard/phonedriver_tap.xml 2>/dev/null
 
     if [ ! -f /tmp/phonedriver_tap.xml ]; then
         echo "ERROR: UI dump failed"
@@ -562,7 +567,7 @@ if matches and index < len(matches):
         local tx ty
         tx=$(echo "$tap_line" | awk '{print $1}')
         ty=$(echo "$tap_line" | awk '{print $2}')
-        $ADB shell input tap "$tx" "$ty"
+        adb_cmd shell input tap "$tx" "$ty"
     fi
 }
 
@@ -572,9 +577,9 @@ find_elements() {
     local query="${1:-}"
 
     # Capture fresh UI dump
-    $ADB shell uiautomator dump /sdcard/phonedriver_find.xml > /dev/null 2>&1
-    $ADB pull /sdcard/phonedriver_find.xml /tmp/phonedriver_find.xml > /dev/null 2>&1
-    $ADB shell rm /sdcard/phonedriver_find.xml 2>/dev/null
+    adb_cmd shell uiautomator dump /sdcard/phonedriver_find.xml > /dev/null 2>&1
+    adb_cmd pull /sdcard/phonedriver_find.xml /tmp/phonedriver_find.xml > /dev/null 2>&1
+    adb_cmd shell rm /sdcard/phonedriver_find.xml 2>/dev/null
 
     if [ ! -f /tmp/phonedriver_find.xml ]; then
         echo "ERROR: UI dump failed"
@@ -627,7 +632,7 @@ for node in root.iter('node'):
 # ── Run ADB command (exposes $ADB for prompt use) ─────────────────────
 
 run_adb() {
-    $ADB "$@"
+    adb_cmd "$@"
 }
 
 # ── Batch Actions ──────────────────────────────────────────────────────
@@ -650,7 +655,7 @@ batch_actions() {
                 y=$(echo "$cmd" | awk '{print $3}')
                 # If first arg is not a number, treat as tap-on (element name)
                 if echo "$x" | grep -qE '^[0-9]+$'; then
-                    $ADB shell input tap "$x" "$y"
+                    adb_cmd shell input tap "$x" "$y"
                 else
                     # Rest of cmd after "tap " is the element query
                     local tap_query
@@ -665,17 +670,17 @@ batch_actions() {
                 x2=$(echo "$cmd" | awk '{print $4}')
                 y2=$(echo "$cmd" | awk '{print $5}')
                 dur=$(echo "$cmd" | awk '{print $6}')
-                $ADB shell input swipe "$x1" "$y1" "$x2" "$y2" "${dur:-300}"
+                adb_cmd shell input swipe "$x1" "$y1" "$x2" "$y2" "${dur:-300}"
                 ;;
             text)
                 local txt
                 txt=$(echo "$cmd" | sed "s/^text //" | sed "s/^'//;s/'$//")
-                $ADB shell input text "$txt"
+                adb_cmd shell input text "$txt"
                 ;;
             key)
                 local keycode
                 keycode=$(echo "$cmd" | awk '{print $2}')
-                $ADB shell input keyevent "$keycode"
+                adb_cmd shell input keyevent "$keycode"
                 ;;
             launch)
                 # launch <app_name_or_activity>
@@ -683,7 +688,7 @@ batch_actions() {
                 launch_target=$(echo "$cmd" | sed "s/^launch //" | sed "s/^'//;s/'$//")
                 # If it looks like a component (has /), use am start directly
                 if echo "$launch_target" | grep -q "/"; then
-                    $ADB shell am start -n "$launch_target" 2>/dev/null
+                    adb_cmd shell am start -n "$launch_target" 2>/dev/null
                 else
                     launch_app "$launch_target"
                 fi
@@ -692,7 +697,7 @@ batch_actions() {
                 # intent <action> — e.g., intent android.settings.WIFI_SETTINGS
                 local intent_action
                 intent_action=$(echo "$cmd" | awk '{print $2}')
-                $ADB shell am start -a "$intent_action" 2>/dev/null
+                adb_cmd shell am start -a "$intent_action" 2>/dev/null
                 ;;
             sleep)
                 local secs
@@ -718,10 +723,10 @@ batch_actions() {
                 elapsed=0
                 while [ "$elapsed" -lt "$timeout_s" ]; do
                     # Quick UI dump check (suppress errors)
-                    $ADB shell uiautomator dump /sdcard/phonedriver_waitfor.xml > /dev/null 2>&1
+                    adb_cmd shell uiautomator dump /sdcard/phonedriver_waitfor.xml > /dev/null 2>&1
                     local found=""
-                    found=$($ADB shell "cat /sdcard/phonedriver_waitfor.xml 2>/dev/null | grep -o 'text=\"[^\"]*${target}[^\"]*\"' || grep -o 'resource-id=\"[^\"]*${target}[^\"]*\"' /sdcard/phonedriver_waitfor.xml 2>/dev/null" 2>/dev/null || true)
-                    $ADB shell rm /sdcard/phonedriver_waitfor.xml 2>/dev/null
+                    found=$(adb_cmd shell "cat /sdcard/phonedriver_waitfor.xml 2>/dev/null | grep -o 'text=\"[^\"]*${target}[^\"]*\"' || grep -o 'resource-id=\"[^\"]*${target}[^\"]*\"' /sdcard/phonedriver_waitfor.xml 2>/dev/null" 2>/dev/null || true)
+                    adb_cmd shell rm /sdcard/phonedriver_waitfor.xml 2>/dev/null
                     if [ -n "$found" ]; then
                         echo "WAITFOR_OK: Found '$target' after ${elapsed}s"
                         break
@@ -744,7 +749,7 @@ batch_actions() {
 
 get_device_key() {
     local model
-    model=$($ADB shell getprop ro.product.model 2>/dev/null | tr -d '\r')
+    model=$(adb_cmd shell getprop ro.product.model 2>/dev/null | tr -d '\r')
     local resolution
     resolution=$(get_resolution)
     python3 "$MEMORY_TREE" device-key "$model" "$resolution"
@@ -907,10 +912,10 @@ case "${1:-help}" in
             save-correction) python3 "$MEMORY_TREE" save-correction "${3:-}" "${4:-}" "${5:-}" ;;
             save-device)
                 local model res ver did
-                model=$($ADB shell getprop ro.product.model 2>/dev/null | tr -d '\r')
+                model=$(adb_cmd shell getprop ro.product.model 2>/dev/null | tr -d '\r')
                 res=$(get_resolution)
-                ver=$($ADB shell getprop ro.build.version.release 2>/dev/null | tr -d '\r')
-                did=$($ADB devices 2>/dev/null | grep -w "device" | grep -v "List" | head -1 | awk '{print $1}')
+                ver=$(adb_cmd shell getprop ro.build.version.release 2>/dev/null | tr -d '\r')
+                did=$(adb_cmd devices 2>/dev/null | grep -w "device" | grep -v "List" | head -1 | awk -F'\t' '{print $1}')
                 python3 "$MEMORY_TREE" save-device "$model" "$res" "$ver" "$did"
                 ;;
             *)      echo "Usage: $0 memory {init|read|write|prune|migrate|find-task|get-task|save-task|compile-task|get-replay|save-screen|save-element|save-element-full|save-transition|identify-screen|save-device}" ;;

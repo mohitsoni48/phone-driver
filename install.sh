@@ -65,6 +65,7 @@ install_files() {
         echo "  Installing from local repo: $SCRIPT_DIR"
         cp "$SCRIPT_DIR/scripts/adb-helpers.sh" "$INSTALL_DIR/scripts/"
         cp "$SCRIPT_DIR/scripts/memory-tree.py" "$INSTALL_DIR/scripts/"
+        cp "$SCRIPT_DIR/scripts/pd" "$INSTALL_DIR/scripts/" 2>/dev/null || true
         cp "$SCRIPT_DIR/.claude/commands/phone-driver.md" "$COMMANDS_DIR/phone-driver.md"
         # Copy memory only if not already present (don't overwrite learned skills)
         if [ ! -f "$INSTALL_DIR/memory.json" ]; then
@@ -84,6 +85,7 @@ install_files() {
 
     chmod +x "$INSTALL_DIR/scripts/adb-helpers.sh"
     chmod +x "$INSTALL_DIR/scripts/memory-tree.py"
+    chmod +x "$INSTALL_DIR/scripts/pd" 2>/dev/null || true
 
     echo "  [ok] Scripts installed"
     echo "  [ok] Command installed"
