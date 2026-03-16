@@ -107,7 +107,7 @@ $PD launch "<app>" && sleep 1.5 && $PD find-elements
 
 ### Save What You Learn
 
-After each successful interaction, save the element:
+**After each SUCCESSFUL interaction**, save the element:
 ```bash
 $PD memory save-element-full <app> <screen> <element_name> '{"resource_id":"<rid>","text":"<text>","content_desc":"<desc>","class":"<class>","clickable":true,"bounds_by_device":{"<device_key>":[left,top,right,bottom]}}'
 ```
@@ -116,6 +116,33 @@ Save screen transitions:
 ```bash
 $PD memory save-transition <app> <old_screen> "tap <element>" <new_screen>
 ```
+
+### Save Corrections (Learn from Mistakes)
+
+**After a WRONG tap or failed action**, save a correction so you never repeat it:
+```bash
+$PD memory save-correction <app> <screen> '{"wrong":"<what you did wrong>","right":"<what to do instead>","reason":"<why it was wrong>"}'
+```
+
+**Examples:**
+```bash
+# Tapped the wrong "Search" — voice icon instead of text bar
+$PD memory save-correction chrome home '{"wrong":"tap-on Search (matches voice search icon)","right":"tap-on Search or type URL (the text bar)","reason":"Multiple elements match Search — use the full text label"}'
+
+# Tapped a non-clickable area
+$PD memory save-correction settings wifi_screen '{"wrong":"tap-on Wi-Fi text label","right":"tap-on the toggle switch to the right","reason":"The label text is not clickable, only the switch is"}'
+
+# Wrong screen appeared after tap
+$PD memory save-correction chrome home '{"wrong":"tap-on menu_button expecting settings","right":"tap-on menu_button then look for Settings in dropdown","reason":"menu_button opens a popup menu, not settings directly"}'
+```
+
+**IMPORTANT**: The skill library shows corrections as warnings (⚠ AVOID). Always check these before acting on a screen — they tell you what NOT to do.
+
+Corrections save you from:
+- Tapping the wrong element when multiple have similar names
+- Tapping non-clickable elements
+- Expecting the wrong screen after a tap
+- Any action that failed and had to be corrected
 
 ### Text Input
 ```bash

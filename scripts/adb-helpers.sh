@@ -809,6 +809,7 @@ case "${1:-help}" in
                 python3 "$MEMORY_TREE" identify-screen "${3:-}" "$UIDUMP_PATH"
                 ;;
             list-skills)    python3 "$MEMORY_TREE" list-skills "${3:-}" ;;
+            save-correction) python3 "$MEMORY_TREE" save-correction "${3:-}" "${4:-}" "${5:-}" ;;
             save-device)
                 local model res ver did
                 model=$($ADB shell getprop ro.product.model 2>/dev/null | tr -d '\r')

@@ -583,6 +583,15 @@ def cmd_list_skills(device_key=None):
                 lines.append(f"  - screen `{sname}`: elements=[{', '.join(elements)}]{bounds_note}")
                 for action, target in transitions.items():
                     lines.append(f"    → {action} → `{target}`")
+                for correction in screen.get("corrections", []):
+                    wrong = correction.get("wrong", "")
+                    right = correction.get("right", "")
+                    reason = correction.get("reason", "")
+                    lines.append(f"    ⚠ AVOID: {wrong}")
+                    if right:
+                        lines.append(f"      USE INSTEAD: {right}")
+                    if reason:
+                        lines.append(f"      REASON: {reason}")
 
     # Tasks with replay commands
     lines.append("")
@@ -623,6 +632,34 @@ def cmd_list_skills(device_key=None):
             lines.append(f"- {name}: `intent {intent}`")
 
     print("\n".join(lines))
+
+
+# ── Corrections (learn from mistakes) ──────────────────────────────────
+
+def cmd_save_correction(app_name, screen_name, correction_json):
+    """Save a correction: what went wrong and what to do instead."""
+    data = load_memory()
+    app = data.get("apps", {}).get(app_name)
+    if not app:
+        print(f"ERROR: App '{app_name}' not found")
+        sys.exit(1)
+
+    screen = app.setdefault("screens", {}).setdefault(
+        screen_name, {"identifiers": {}, "elements": {}, "transitions": {}, "corrections": []}
+    )
+    corrections = screen.setdefault("corrections", [])
+    correction = json.loads(correction_json)
+    # Deduplicate: don't save the same correction twice
+    for existing in corrections:
+        if existing.get("wrong") == correction.get("wrong"):
+            existing.update(correction)
+            save_memory(data)
+            print(f"OK: Updated correction on '{app_name}/{screen_name}'")
+            return
+
+    corrections.append(correction)
+    save_memory(data)
+    print(f"OK: Saved correction on '{app_name}/{screen_name}': avoid \"{correction.get('wrong', '')}\"")
 
 
 # ── Save Device ────────────────────────────────────────────────────────
@@ -682,6 +719,8 @@ def main():
         cmd_save_device(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5])
     elif cmd == "list-skills":
         cmd_list_skills(sys.argv[2] if len(sys.argv) > 2 else None)
+    elif cmd == "save-correction":
+        cmd_save_correction(sys.argv[2], sys.argv[3], sys.argv[4])
     else:
         print(f"Unknown command: {cmd}")
         sys.exit(1)
