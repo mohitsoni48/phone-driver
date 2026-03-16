@@ -1,0 +1,7 @@
+{
+  "active": true,
+  "started_at": "2026-03-12T06:58:39.915Z",
+  "original_prompt": "/oh-my-claudecode:ultrawork see how history api is called and how live feed is updated in this app. you have urls, data classees and everything needed. I want that you create a local backend server in docker and add a swithch in the app to switch between local and real server. the local server should send data 24 hrs. in local server if live ticks are received from real server, send it as is but if not, simulate it based on history. the data should not be extremely random of live tick but you can simulate ohlc from 9 hrs before per minute and calulate a random tick assuring correct ohlc. basically what i want is that even after market hours, I get data from my local backend server",
+  "reinforcement_count": 10,
+  "last_checked_at": "2026-03-14T10:26:59.479Z"
+}

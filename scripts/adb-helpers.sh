@@ -331,6 +331,210 @@ sys.exit(1)
     fi
 }
 
+# ── Tap on Element (UI dump → find → compute center → tap) ────────────
+
+tap_on() {
+    # Usage: tap_on <text_or_rid_or_desc> [--index N]
+    # Finds element by text, content-desc, or resource-id, computes center, taps it.
+    # Returns: TAPPED: <x> <y> <matched_text> <bounds>
+    local query="$1"
+    local index="${2:-0}"  # 0 = first match
+
+    if [ -z "$query" ]; then
+        echo "Usage: $0 tap-on <text|resource-id|content-desc> [--index N]"
+        exit 1
+    fi
+
+    # Handle --index flag
+    if [ "${2:-}" = "--index" ]; then
+        index="${3:-0}"
+    fi
+
+    # Capture fresh UI dump
+    $ADB shell uiautomator dump /sdcard/phonedriver_tap.xml > /dev/null 2>&1
+    $ADB pull /sdcard/phonedriver_tap.xml /tmp/phonedriver_tap.xml > /dev/null 2>&1
+    $ADB shell rm /sdcard/phonedriver_tap.xml 2>/dev/null
+
+    if [ ! -f /tmp/phonedriver_tap.xml ]; then
+        echo "ERROR: UI dump failed"
+        return 1
+    fi
+
+    # Find element and tap using Python (exact coordinate math)
+    python3 -c "
+import xml.etree.ElementTree as ET
+import re, sys
+
+tree = ET.parse('/tmp/phonedriver_tap.xml')
+root = tree.getroot()
+query = '''$query'''.lower()
+index = $index
+matches = []
+
+for node in root.iter('node'):
+    text = node.get('text', '')
+    desc = node.get('content-desc', '')
+    rid = node.get('resource-id', '')
+    bounds_str = node.get('bounds', '')
+
+    if not bounds_str:
+        continue
+
+    matched = False
+    match_on = ''
+
+    # Exact matches first
+    if text.lower() == query:
+        matched = True
+        match_on = f'text=\"{text}\"'
+    elif desc.lower() == query:
+        matched = True
+        match_on = f'content-desc=\"{desc}\"'
+    elif rid.lower() == query or rid.lower().endswith('/' + query) or rid.lower().endswith(':id/' + query):
+        matched = True
+        match_on = f'resource-id=\"{rid}\"'
+    # Partial/contains matches
+    elif query in text.lower():
+        matched = True
+        match_on = f'text=\"{text}\" (partial)'
+    elif query in desc.lower():
+        matched = True
+        match_on = f'content-desc=\"{desc}\" (partial)'
+    elif query in rid.lower():
+        matched = True
+        match_on = f'resource-id=\"{rid}\" (partial)'
+
+    if matched:
+        m = re.match(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]', bounds_str)
+        if m:
+            l, t, r, b = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
+            cx, cy = (l + r) // 2, (t + b) // 2
+            matches.append((cx, cy, match_on, bounds_str, text or desc or rid))
+
+if not matches:
+    print(f'NOT_FOUND: No element matching \"{query}\"')
+    # Show available clickable elements as hints
+    hints = []
+    for node in root.iter('node'):
+        t = node.get('text', '')
+        d = node.get('content-desc', '')
+        r = node.get('resource-id', '')
+        c = node.get('clickable', 'false')
+        label = t or d or r.split('/')[-1] if r else ''
+        if label and c == 'true':
+            hints.append(label)
+    if hints:
+        print(f'HINT: Available elements: {\", \".join(hints[:15])}')
+    sys.exit(1)
+
+if index >= len(matches):
+    index = 0
+
+cx, cy, match_on, bounds, label = matches[index]
+print(f'TAPPED: {cx} {cy} ({match_on}) bounds={bounds}')
+if len(matches) > 1:
+    print(f'NOTE: {len(matches)} matches found, tapped index {index}')
+" || return 1
+
+    # Extract coordinates from output and tap
+    local tap_line
+    tap_line=$(python3 -c "
+import xml.etree.ElementTree as ET
+import re
+
+tree = ET.parse('/tmp/phonedriver_tap.xml')
+root = tree.getroot()
+query = '''$query'''.lower()
+index = $index
+matches = []
+
+for node in root.iter('node'):
+    text = node.get('text', '')
+    desc = node.get('content-desc', '')
+    rid = node.get('resource-id', '')
+    bounds_str = node.get('bounds', '')
+    if not bounds_str:
+        continue
+    matched = (text.lower() == query or desc.lower() == query or
+               rid.lower() == query or rid.lower().endswith('/' + query) or
+               rid.lower().endswith(':id/' + query) or
+               query in text.lower() or query in desc.lower() or query in rid.lower())
+    if matched:
+        m = re.match(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]', bounds_str)
+        if m:
+            l, t, r, b = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
+            matches.append(((l+r)//2, (t+b)//2))
+
+if matches and index < len(matches):
+    print(f'{matches[index][0]} {matches[index][1]}')
+")
+
+    if [ -n "$tap_line" ]; then
+        local tx ty
+        tx=$(echo "$tap_line" | awk '{print $1}')
+        ty=$(echo "$tap_line" | awk '{print $2}')
+        $ADB shell input tap "$tx" "$ty"
+    fi
+}
+
+# ── Find Elements (list all matching elements with bounds) ────────────
+
+find_elements() {
+    local query="${1:-}"
+
+    # Capture fresh UI dump
+    $ADB shell uiautomator dump /sdcard/phonedriver_find.xml > /dev/null 2>&1
+    $ADB pull /sdcard/phonedriver_find.xml /tmp/phonedriver_find.xml > /dev/null 2>&1
+    $ADB shell rm /sdcard/phonedriver_find.xml 2>/dev/null
+
+    if [ ! -f /tmp/phonedriver_find.xml ]; then
+        echo "ERROR: UI dump failed"
+        return 1
+    fi
+
+    python3 -c "
+import xml.etree.ElementTree as ET
+import re
+
+tree = ET.parse('/tmp/phonedriver_find.xml')
+root = tree.getroot()
+query = '''$query'''.lower() if '''$query''' else ''
+
+for node in root.iter('node'):
+    text = node.get('text', '')
+    desc = node.get('content-desc', '')
+    rid = node.get('resource-id', '')
+    bounds_str = node.get('bounds', '')
+    clickable = node.get('clickable', 'false')
+    focused = node.get('focused', 'false')
+    checked = node.get('checked', 'false')
+
+    label = text or desc or (rid.split('/')[-1] if rid else '')
+    if not label and clickable != 'true':
+        continue
+
+    if query and query not in text.lower() and query not in desc.lower() and query not in rid.lower():
+        continue
+
+    m = re.match(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]', bounds_str)
+    if not m:
+        continue
+
+    l, t, r, b = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
+    cx, cy = (l + r) // 2, (t + b) // 2
+
+    attrs = []
+    if text: attrs.append(f'text=\"{text}\"')
+    if desc: attrs.append(f'desc=\"{desc}\"')
+    if rid: attrs.append(f'rid=\"{rid}\"')
+    if clickable == 'true': attrs.append('clickable')
+    if focused == 'true': attrs.append('focused')
+    if checked == 'true': attrs.append('checked')
+
+    print(f'  [{cx},{cy}] {\" \".join(attrs)} bounds={bounds_str}')
+"
+}
+
 # ── Run ADB command (exposes $ADB for prompt use) ─────────────────────
 
 run_adb() {
@@ -355,7 +559,15 @@ batch_actions() {
                 local x y
                 x=$(echo "$cmd" | awk '{print $2}')
                 y=$(echo "$cmd" | awk '{print $3}')
-                $ADB shell input tap "$x" "$y"
+                # If first arg is not a number, treat as tap-on (element name)
+                if echo "$x" | grep -qE '^[0-9]+$'; then
+                    $ADB shell input tap "$x" "$y"
+                else
+                    # Rest of cmd after "tap " is the element query
+                    local tap_query
+                    tap_query=$(echo "$cmd" | sed 's/^tap //')
+                    tap_on "$tap_query"
+                fi
                 ;;
             swipe)
                 local x1 y1 x2 y2 dur
@@ -558,6 +770,12 @@ case "${1:-help}" in
         ;;
     launch)
         launch_app "${2:-}"
+        ;;
+    tap-on)
+        tap_on "${2:-}" "${3:-}" "${4:-}"
+        ;;
+    find-elements)
+        find_elements "${2:-}"
         ;;
     batchact)
         batch_actions "${2:-}"
