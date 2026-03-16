@@ -29,6 +29,7 @@ SCREENSHOT_DEFAULT="/tmp/phonedriver_screen.png"
 UIDUMP_PATH="/tmp/phonedriver_ui.xml"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PD_HOME="$HOME/.claude/phonedriver"
+DEVICE_SESSION_FILE="/tmp/phonedriver_device_session"
 
 # Memory file: prefer installed location, fall back to repo location
 if [ -f "$PD_HOME/memory.json" ]; then
@@ -39,6 +40,12 @@ else
     MEMORY_FILE="$PD_HOME/memory.json"
 fi
 MEMORY_TREE="$SCRIPT_DIR/memory-tree.py"
+
+# If a device session is locked, use that device for ALL commands
+if [ -f "$DEVICE_SESSION_FILE" ]; then
+    _LOCKED_DEVICE=$(cat "$DEVICE_SESSION_FILE")
+    ADB="$ADB -s $_LOCKED_DEVICE"
+fi
 
 # ── JSON helpers (jq preferred, python3 fallback) ──────────────────────
 
@@ -99,34 +106,116 @@ with open('$tmp_file', 'w') as f: json.dump(data, f, indent=2)
 
 # ── Device commands ────────────────────────────────────────────────────
 
+# Get the base ADB binary (without -s flag) for device listing
+_adb_base() {
+    if [ -x "$HOME/Library/Android/sdk/platform-tools/adb" ]; then
+        echo "$HOME/Library/Android/sdk/platform-tools/adb"
+    elif command -v adb &>/dev/null; then
+        command -v adb
+    fi
+}
+
 check_device() {
+    local adb_base
+    adb_base=$(_adb_base)
+
+    # If already locked to a device, verify it's still connected
+    if [ -f "$DEVICE_SESSION_FILE" ]; then
+        local locked_id
+        locked_id=$(cat "$DEVICE_SESSION_FILE")
+        local still_connected
+        still_connected=$("$adb_base" devices 2>/dev/null | grep "$locked_id" | grep -w "device" || true)
+        if [ -n "$still_connected" ]; then
+            local model
+            model=$($ADB shell getprop ro.product.model 2>/dev/null | tr -d '\r')
+            local android_version
+            android_version=$($ADB shell getprop ro.build.version.release 2>/dev/null | tr -d '\r')
+            echo "OK: Locked to $model (Android $android_version) [$locked_id]"
+            return 0
+        else
+            echo "WARNING: Previously locked device $locked_id is no longer connected. Re-selecting..."
+            rm -f "$DEVICE_SESSION_FILE"
+            # Reset ADB to base (remove stale -s flag)
+            ADB="$adb_base"
+        fi
+    fi
+
     local devices
-    devices=$($ADB devices 2>/dev/null | grep -w "device" | grep -v "List")
+    devices=$("$adb_base" devices 2>/dev/null | grep -w "device" | grep -v "List")
 
     if [ -z "$devices" ]; then
-        echo "ERROR: No authorized Android device found."
+        echo "NO_DEVICE: No authorized Android device found."
+        echo "ACTION_REQUIRED: Connect a device with USB debugging enabled, then retry."
         echo "Troubleshooting:"
         echo "  1. Enable USB debugging: Settings > Developer Options > USB Debugging"
         echo "  2. Connect device via USB"
         echo "  3. Accept the authorization prompt on the phone"
         echo "  4. Run: adb devices"
-        exit 1
+        return 1
     fi
 
     local count
     count=$(echo "$devices" | wc -l | tr -d ' ')
-    if [ "$count" -gt 1 ]; then
-        echo "WARNING: Multiple devices connected. Using first device."
+
+    if [ "$count" -eq 1 ]; then
+        local device_id
+        device_id=$(echo "$devices" | head -1 | awk '{print $1}')
+        # Lock to this device
+        echo "$device_id" > "$DEVICE_SESSION_FILE"
+        ADB="$adb_base -s $device_id"
+        local model
+        model=$($ADB shell getprop ro.product.model 2>/dev/null | tr -d '\r')
+        local android_version
+        android_version=$($ADB shell getprop ro.build.version.release 2>/dev/null | tr -d '\r')
+        echo "OK: Locked to $model (Android $android_version) [$device_id]"
+        return 0
     fi
 
-    local device_id
-    device_id=$(echo "$devices" | head -1 | awk '{print $1}')
-    local model
-    model=$($ADB -s "$device_id" shell getprop ro.product.model 2>/dev/null | tr -d '\r')
-    local android_version
-    android_version=$($ADB -s "$device_id" shell getprop ro.build.version.release 2>/dev/null | tr -d '\r')
+    # Multiple devices — list them for selection
+    echo "MULTIPLE_DEVICES: $count devices connected. Select one:"
+    local i=1
+    while IFS= read -r line; do
+        local did
+        did=$(echo "$line" | awk '{print $1}')
+        local dmodel
+        dmodel=$("$adb_base" -s "$did" shell getprop ro.product.model 2>/dev/null | tr -d '\r')
+        echo "  $i) $dmodel [$did]"
+        i=$((i + 1))
+    done <<< "$devices"
+    echo "ACTION_REQUIRED: Run '$0 select-device <device_id>' to lock to a device."
+    return 1
+}
 
-    echo "OK: Connected to $model (Android $android_version) [$device_id]"
+select_device() {
+    local device_id="$1"
+    local adb_base
+    adb_base=$(_adb_base)
+
+    if [ -z "$device_id" ]; then
+        echo "Usage: $0 select-device <device_id>"
+        echo "Run '$0 check' to see available devices."
+        return 1
+    fi
+
+    # Verify device exists
+    local found
+    found=$("$adb_base" devices 2>/dev/null | grep "$device_id" | grep -w "device" || true)
+    if [ -z "$found" ]; then
+        echo "ERROR: Device '$device_id' not found or not authorized."
+        return 1
+    fi
+
+    echo "$device_id" > "$DEVICE_SESSION_FILE"
+    ADB="$adb_base -s $device_id"
+    local model
+    model=$($ADB shell getprop ro.product.model 2>/dev/null | tr -d '\r')
+    echo "OK: Locked to $model [$device_id] for this session."
+    echo "All commands will target this device until you run '$0 release-device'."
+}
+
+release_device() {
+    rm -f "$DEVICE_SESSION_FILE"
+    echo "OK: Device lock released. Next command will auto-detect."
 }
 
 get_resolution() {
@@ -755,6 +844,12 @@ print(f'Pruned {len(pruned)} stale entries: {pruned}' if pruned else 'Nothing to
 case "${1:-help}" in
     check)
         check_device
+        ;;
+    select-device)
+        select_device "${2:-}"
+        ;;
+    release-device)
+        release_device
         ;;
     resolution)
         get_resolution
