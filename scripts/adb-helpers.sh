@@ -428,46 +428,45 @@ sys.exit(1)
 # ── Tap on Element (UI dump → find → compute center → tap) ────────────
 
 tap_on() {
-    # Usage: tap_on <text_or_rid_or_desc> [--app APP --screen SCREEN] [--index N]
-    # Finds element, computes center, taps, AND auto-saves to memory.
+    # Usage: tap_on <text_or_rid_or_desc> [--index N]
+    # 1. Dumps UI BEFORE tap (identifies current screen)
+    # 2. Finds element, computes center, taps
+    # 3. Waits, dumps UI AFTER tap
+    # 4. If screen changed → auto-saves elements + transition to memory
+    # 5. If screen same → saves element only (toggle/button action)
     local query="$1"
     local index=0
-    local app_name=""
-    local screen_name=""
 
     if [ -z "$query" ]; then
-        echo "Usage: $0 tap-on <text|resource-id|content-desc> [--app APP --screen SCREEN] [--index N]"
+        echo "Usage: $0 tap-on <text|resource-id|content-desc> [--index N]"
         exit 1
     fi
 
-    # Parse optional flags
     shift
     while [ $# -gt 0 ]; do
         case "$1" in
             --index) index="${2:-0}"; shift 2 ;;
-            --app) app_name="${2:-}"; shift 2 ;;
-            --screen) screen_name="${2:-}"; shift 2 ;;
             *) shift ;;
         esac
     done
 
-    # Capture fresh UI dump
-    adb_cmd shell uiautomator dump /sdcard/phonedriver_tap.xml > /dev/null 2>&1
-    adb_cmd pull /sdcard/phonedriver_tap.xml /tmp/phonedriver_tap.xml > /dev/null 2>&1
-    adb_cmd shell rm /sdcard/phonedriver_tap.xml 2>/dev/null
+    # Step 1: Dump BEFORE tap (this is the source screen)
+    adb_cmd shell uiautomator dump /sdcard/phonedriver_before.xml > /dev/null 2>&1
+    adb_cmd pull /sdcard/phonedriver_before.xml /tmp/phonedriver_before.xml > /dev/null 2>&1
+    adb_cmd shell rm /sdcard/phonedriver_before.xml 2>/dev/null
 
-    if [ ! -f /tmp/phonedriver_tap.xml ]; then
+    if [ ! -f /tmp/phonedriver_before.xml ]; then
         echo "ERROR: UI dump failed"
         return 1
     fi
 
-    # Single Python call: find element and get tap coords
+    # Step 2: Find element and tap
     local result
     result=$(python3 -c "
 import xml.etree.ElementTree as ET
 import re, sys
 
-tree = ET.parse('/tmp/phonedriver_tap.xml')
+tree = ET.parse('/tmp/phonedriver_before.xml')
 root = tree.getroot()
 query = '''$query'''.lower()
 index = $index
@@ -478,14 +477,11 @@ for node in root.iter('node'):
     desc = node.get('content-desc', '')
     rid = node.get('resource-id', '')
     bounds_str = node.get('bounds', '')
-
     if not bounds_str:
         continue
-
     m = re.match(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]', bounds_str)
     if not m:
         continue
-
     l, t, r, b = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
     cx, cy = (l + r) // 2, (t + b) // 2
 
@@ -524,7 +520,6 @@ if not matches:
 
 if index >= len(matches):
     index = 0
-
 cx, cy, match_on, bounds_str, label = matches[index]
 print(f'TAPPED: {cx} {cy} ({match_on}) bounds={bounds_str}')
 if len(matches) > 1:
@@ -534,15 +529,194 @@ print(f'TAP_COORDS: {cx} {cy}')
 
     echo "$result" | grep -v "^TAP_COORDS:"
 
-    # Extract coords and tap
     local coords
     coords=$(echo "$result" | grep "^TAP_COORDS:" | sed 's/TAP_COORDS: //')
-    if [ -n "$coords" ]; then
-        local tx ty
-        tx=$(echo "$coords" | awk '{print $1}')
-        ty=$(echo "$coords" | awk '{print $2}')
-        adb_cmd shell input tap "$tx" "$ty"
+    if [ -z "$coords" ]; then
+        return 1
     fi
+
+    local tx ty
+    tx=$(echo "$coords" | awk '{print $1}')
+    ty=$(echo "$coords" | awk '{print $2}')
+    adb_cmd shell input tap "$tx" "$ty"
+
+    # Step 3: Wait for UI to settle, dump AFTER tap
+    sleep 1.5
+    adb_cmd shell uiautomator dump /sdcard/phonedriver_after.xml > /dev/null 2>&1
+    adb_cmd pull /sdcard/phonedriver_after.xml /tmp/phonedriver_after.xml > /dev/null 2>&1
+    adb_cmd shell rm /sdcard/phonedriver_after.xml 2>/dev/null
+
+    if [ ! -f /tmp/phonedriver_after.xml ]; then
+        echo "MEMO_SKIP: Could not capture post-tap screen"
+        return 0
+    fi
+
+    # Step 4: Auto-memoize — compare before/after, save if screen changed
+    local dev_key=""
+    dev_key=$(get_device_key 2>/dev/null || echo "")
+
+    python3 -c "
+import xml.etree.ElementTree as ET
+import json, re, os, hashlib
+
+def screen_signature(xml_path):
+    \"\"\"Generate a fingerprint of a screen based on its key elements.\"\"\"
+    tree = ET.parse(xml_path)
+    root = tree.getroot()
+    sig_parts = []
+    for node in root.iter('node'):
+        rid = node.get('resource-id', '')
+        text = node.get('text', '')
+        desc = node.get('content-desc', '')
+        if rid or text or desc:
+            sig_parts.append(f'{rid}|{text}|{desc}')
+    return hashlib.md5('::'.join(sorted(sig_parts)).encode()).hexdigest()[:12]
+
+def extract_elements(xml_path):
+    tree = ET.parse(xml_path)
+    root = tree.getroot()
+    elements = {}
+    for node in root.iter('node'):
+        text = node.get('text', '')
+        desc = node.get('content-desc', '')
+        rid = node.get('resource-id', '')
+        bounds_str = node.get('bounds', '')
+        clickable = node.get('clickable', 'false')
+        label = text or desc or (rid.split('/')[-1] if rid else '')
+        if not label:
+            continue
+        if clickable != 'true' and not text and not desc:
+            continue
+        m = re.match(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]', bounds_str)
+        if not m:
+            continue
+        l, t, r, b = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
+        ename = re.sub(r'[^a-zA-Z0-9_]', '_', label.lower().strip())[:40]
+        if ename:
+            elements[ename] = {
+                'resource_id': rid, 'text': text, 'content_desc': desc,
+                'clickable': clickable == 'true', 'bounds': [l, t, r, b]
+            }
+    return elements
+
+def detect_app(xml_path):
+    \"\"\"Try to detect app package from the UI dump.\"\"\"
+    tree = ET.parse(xml_path)
+    root = tree.getroot()
+    for node in root.iter('node'):
+        pkg = node.get('package', '')
+        if pkg and pkg != 'com.android.systemui':
+            return pkg
+    return ''
+
+before_sig = screen_signature('/tmp/phonedriver_before.xml')
+after_sig = screen_signature('/tmp/phonedriver_after.xml')
+screen_changed = before_sig != after_sig
+
+dev_key = '''$dev_key'''
+memory_file = '''$MEMORY_FILE'''
+query = '''$query'''
+
+if not dev_key or not os.path.exists(memory_file):
+    if screen_changed:
+        print(f'SCREEN_CHANGED: (no memory file to save)')
+    exit(0)
+
+with open(memory_file) as f:
+    data = json.load(f)
+
+# Detect which app we're in
+after_pkg = detect_app('/tmp/phonedriver_after.xml')
+before_pkg = detect_app('/tmp/phonedriver_before.xml')
+
+# Find app name in memory by package
+app_name = ''
+for name, app in data.get('apps', {}).items():
+    if app.get('package') == before_pkg or app.get('package') == after_pkg:
+        app_name = name
+        break
+
+if not app_name:
+    if screen_changed:
+        print(f'SCREEN_CHANGED: app not in memory, skipping save')
+    exit(0)
+
+app = data['apps'][app_name]
+screens = app.setdefault('screens', {})
+
+# Name the before screen by its signature (or find existing)
+before_screen = None
+after_screen = None
+for sname, sdata in screens.items():
+    if sdata.get('identifiers', {}).get('signature') == before_sig:
+        before_screen = sname
+    if sdata.get('identifiers', {}).get('signature') == after_sig:
+        after_screen = sname
+
+# Save before screen elements
+before_elements = extract_elements('/tmp/phonedriver_before.xml')
+if not before_screen:
+    # Auto-name: use first 2-3 distinctive element names
+    names = [n for n in list(before_elements.keys())[:3]]
+    before_screen = '_'.join(names) if names else f'screen_{before_sig}'
+    before_screen = before_screen[:30]
+
+screen_data = screens.setdefault(before_screen, {'identifiers': {}, 'elements': {}, 'transitions': {}})
+screen_data['identifiers']['signature'] = before_sig
+saved_before = 0
+for ename, el in before_elements.items():
+    if ename not in screen_data['elements']:
+        screen_data['elements'][ename] = {
+            'resource_id': el['resource_id'], 'text': el['text'],
+            'content_desc': el['content_desc'], 'clickable': el['clickable'],
+            'bounds_by_device': {dev_key: el['bounds']}
+        }
+        saved_before += 1
+    else:
+        screen_data['elements'][ename].setdefault('bounds_by_device', {})[dev_key] = el['bounds']
+
+if screen_changed:
+    # Save after screen elements
+    after_elements = extract_elements('/tmp/phonedriver_after.xml')
+    if not after_screen:
+        names = [n for n in list(after_elements.keys())[:3]]
+        after_screen = '_'.join(names) if names else f'screen_{after_sig}'
+        after_screen = after_screen[:30]
+
+    after_data = screens.setdefault(after_screen, {'identifiers': {}, 'elements': {}, 'transitions': {}})
+    after_data['identifiers']['signature'] = after_sig
+    saved_after = 0
+    for ename, el in after_elements.items():
+        if ename not in after_data['elements']:
+            after_data['elements'][ename] = {
+                'resource_id': el['resource_id'], 'text': el['text'],
+                'content_desc': el['content_desc'], 'clickable': el['clickable'],
+                'bounds_by_device': {dev_key: el['bounds']}
+            }
+            saved_after += 1
+        else:
+            after_data['elements'][ename].setdefault('bounds_by_device', {})[dev_key] = el['bounds']
+
+    # Save transition
+    tap_label = re.sub(r'[^a-zA-Z0-9_]', '_', query.lower().strip())[:30]
+    transition_key = f'tap {tap_label}'
+    screen_data.setdefault('transitions', {})[transition_key] = after_screen
+
+    # Atomic write
+    tmp = memory_file + '.tmp.' + str(os.getpid())
+    with open(tmp, 'w') as f:
+        json.dump(data, f, indent=2)
+    os.replace(tmp, memory_file)
+    print(f'MEMO_SAVED: {app_name}/{before_screen} → tap \"{query}\" → {app_name}/{after_screen} ({saved_before}+{saved_after} elements)')
+else:
+    # Screen didn't change — still save the source screen elements
+    tmp = memory_file + '.tmp.' + str(os.getpid())
+    with open(tmp, 'w') as f:
+        json.dump(data, f, indent=2)
+    os.replace(tmp, memory_file)
+    if saved_before > 0:
+        print(f'MEMO_SAVED: {saved_before} elements on {app_name}/{before_screen} (screen unchanged)')
+" 2>/dev/null || true
 }
 
 # ── Find Elements (list all matching elements with bounds) ────────────
