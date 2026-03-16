@@ -428,21 +428,28 @@ sys.exit(1)
 # ── Tap on Element (UI dump → find → compute center → tap) ────────────
 
 tap_on() {
-    # Usage: tap_on <text_or_rid_or_desc> [--index N]
-    # Finds element by text, content-desc, or resource-id, computes center, taps it.
-    # Returns: TAPPED: <x> <y> <matched_text> <bounds>
+    # Usage: tap_on <text_or_rid_or_desc> [--app APP --screen SCREEN] [--index N]
+    # Finds element, computes center, taps, AND auto-saves to memory.
     local query="$1"
-    local index="${2:-0}"  # 0 = first match
+    local index=0
+    local app_name=""
+    local screen_name=""
 
     if [ -z "$query" ]; then
-        echo "Usage: $0 tap-on <text|resource-id|content-desc> [--index N]"
+        echo "Usage: $0 tap-on <text|resource-id|content-desc> [--app APP --screen SCREEN] [--index N]"
         exit 1
     fi
 
-    # Handle --index flag
-    if [ "${2:-}" = "--index" ]; then
-        index="${3:-0}"
-    fi
+    # Parse optional flags
+    shift
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --index) index="${2:-0}"; shift 2 ;;
+            --app) app_name="${2:-}"; shift 2 ;;
+            --screen) screen_name="${2:-}"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
 
     # Capture fresh UI dump
     adb_cmd shell uiautomator dump /sdcard/phonedriver_tap.xml > /dev/null 2>&1
@@ -454,8 +461,9 @@ tap_on() {
         return 1
     fi
 
-    # Find element and tap using Python (exact coordinate math)
-    python3 -c "
+    # Single Python call: find element and get tap coords
+    local result
+    result=$(python3 -c "
 import xml.etree.ElementTree as ET
 import re, sys
 
@@ -474,47 +482,40 @@ for node in root.iter('node'):
     if not bounds_str:
         continue
 
+    m = re.match(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]', bounds_str)
+    if not m:
+        continue
+
+    l, t, r, b = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
+    cx, cy = (l + r) // 2, (t + b) // 2
+
     matched = False
     match_on = ''
-
-    # Exact matches first
     if text.lower() == query:
-        matched = True
-        match_on = f'text=\"{text}\"'
+        matched, match_on = True, f'text=\"{text}\"'
     elif desc.lower() == query:
-        matched = True
-        match_on = f'content-desc=\"{desc}\"'
+        matched, match_on = True, f'content-desc=\"{desc}\"'
     elif rid.lower() == query or rid.lower().endswith('/' + query) or rid.lower().endswith(':id/' + query):
-        matched = True
-        match_on = f'resource-id=\"{rid}\"'
-    # Partial/contains matches
+        matched, match_on = True, f'resource-id=\"{rid}\"'
     elif query in text.lower():
-        matched = True
-        match_on = f'text=\"{text}\" (partial)'
+        matched, match_on = True, f'text=\"{text}\" (partial)'
     elif query in desc.lower():
-        matched = True
-        match_on = f'content-desc=\"{desc}\" (partial)'
+        matched, match_on = True, f'content-desc=\"{desc}\" (partial)'
     elif query in rid.lower():
-        matched = True
-        match_on = f'resource-id=\"{rid}\" (partial)'
+        matched, match_on = True, f'resource-id=\"{rid}\" (partial)'
 
     if matched:
-        m = re.match(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]', bounds_str)
-        if m:
-            l, t, r, b = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
-            cx, cy = (l + r) // 2, (t + b) // 2
-            matches.append((cx, cy, match_on, bounds_str, text or desc or rid))
+        matches.append((cx, cy, match_on, bounds_str, text or desc or rid))
 
 if not matches:
     print(f'NOT_FOUND: No element matching \"{query}\"')
-    # Show available clickable elements as hints
     hints = []
     for node in root.iter('node'):
         t = node.get('text', '')
         d = node.get('content-desc', '')
         r = node.get('resource-id', '')
         c = node.get('clickable', 'false')
-        label = t or d or r.split('/')[-1] if r else ''
+        label = t or d or (r.split('/')[-1] if r else '')
         if label and c == 'true':
             hints.append(label)
     if hints:
@@ -524,49 +525,22 @@ if not matches:
 if index >= len(matches):
     index = 0
 
-cx, cy, match_on, bounds, label = matches[index]
-print(f'TAPPED: {cx} {cy} ({match_on}) bounds={bounds}')
+cx, cy, match_on, bounds_str, label = matches[index]
+print(f'TAPPED: {cx} {cy} ({match_on}) bounds={bounds_str}')
 if len(matches) > 1:
     print(f'NOTE: {len(matches)} matches found, tapped index {index}')
-" || return 1
+print(f'TAP_COORDS: {cx} {cy}')
+" 2>&1) || true
 
-    # Extract coordinates from output and tap
-    local tap_line
-    tap_line=$(python3 -c "
-import xml.etree.ElementTree as ET
-import re
+    echo "$result" | grep -v "^TAP_COORDS:"
 
-tree = ET.parse('/tmp/phonedriver_tap.xml')
-root = tree.getroot()
-query = '''$query'''.lower()
-index = $index
-matches = []
-
-for node in root.iter('node'):
-    text = node.get('text', '')
-    desc = node.get('content-desc', '')
-    rid = node.get('resource-id', '')
-    bounds_str = node.get('bounds', '')
-    if not bounds_str:
-        continue
-    matched = (text.lower() == query or desc.lower() == query or
-               rid.lower() == query or rid.lower().endswith('/' + query) or
-               rid.lower().endswith(':id/' + query) or
-               query in text.lower() or query in desc.lower() or query in rid.lower())
-    if matched:
-        m = re.match(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]', bounds_str)
-        if m:
-            l, t, r, b = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
-            matches.append(((l+r)//2, (t+b)//2))
-
-if matches and index < len(matches):
-    print(f'{matches[index][0]} {matches[index][1]}')
-")
-
-    if [ -n "$tap_line" ]; then
+    # Extract coords and tap
+    local coords
+    coords=$(echo "$result" | grep "^TAP_COORDS:" | sed 's/TAP_COORDS: //')
+    if [ -n "$coords" ]; then
         local tx ty
-        tx=$(echo "$tap_line" | awk '{print $1}')
-        ty=$(echo "$tap_line" | awk '{print $2}')
+        tx=$(echo "$coords" | awk '{print $1}')
+        ty=$(echo "$coords" | awk '{print $2}')
         adb_cmd shell input tap "$tx" "$ty"
     fi
 }
@@ -626,6 +600,102 @@ for node in root.iter('node'):
     if checked == 'true': attrs.append('checked')
 
     print(f'  [{cx},{cy}] {\" \".join(attrs)} bounds={bounds_str}')
+"
+}
+
+# ── Snapshot Screen (save all elements on current screen to memory) ───
+
+snapshot_screen() {
+    # Usage: snapshot_screen <app> <screen_name>
+    # Captures UI dump and saves ALL elements to memory for this screen.
+    # Call this AFTER verifying you're on the correct screen.
+    local app_name="$1"
+    local screen_name="$2"
+
+    if [ -z "$app_name" ] || [ -z "$screen_name" ]; then
+        echo "Usage: $0 snapshot-screen <app> <screen_name>"
+        return 1
+    fi
+
+    adb_cmd shell uiautomator dump /sdcard/phonedriver_snap.xml > /dev/null 2>&1
+    adb_cmd pull /sdcard/phonedriver_snap.xml /tmp/phonedriver_snap.xml > /dev/null 2>&1
+    adb_cmd shell rm /sdcard/phonedriver_snap.xml 2>/dev/null
+
+    if [ ! -f /tmp/phonedriver_snap.xml ]; then
+        echo "ERROR: UI dump failed"
+        return 1
+    fi
+
+    local dev_key=""
+    dev_key=$(get_device_key 2>/dev/null || echo "")
+
+    python3 -c "
+import xml.etree.ElementTree as ET
+import json, re, os
+
+tree = ET.parse('/tmp/phonedriver_snap.xml')
+root = tree.getroot()
+app_name = '''$app_name'''
+screen_name = '''$screen_name'''
+dev_key = '''$dev_key'''
+memory_file = '''$MEMORY_FILE'''
+
+if not os.path.exists(memory_file):
+    print('ERROR: Memory file not found')
+    exit(1)
+
+with open(memory_file) as f:
+    data = json.load(f)
+
+app = data.get('apps', {}).get(app_name)
+if not app:
+    print(f'ERROR: App \"{app_name}\" not in memory')
+    exit(1)
+
+screens = app.setdefault('screens', {})
+screen = screens.setdefault(screen_name, {'identifiers': {}, 'elements': {}, 'transitions': {}})
+elements = screen.setdefault('elements', {})
+
+saved = 0
+updated = 0
+for node in root.iter('node'):
+    text = node.get('text', '')
+    desc = node.get('content-desc', '')
+    rid = node.get('resource-id', '')
+    bounds_str = node.get('bounds', '')
+    clickable = node.get('clickable', 'false')
+
+    label = text or desc or (rid.split('/')[-1] if rid else '')
+    if not label:
+        continue
+    if clickable != 'true' and not text and not desc:
+        continue
+
+    m = re.match(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]', bounds_str)
+    if not m:
+        continue
+
+    l, t, r, b = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
+    ename = re.sub(r'[^a-zA-Z0-9_]', '_', label.lower().strip())[:40]
+    if not ename:
+        continue
+
+    if ename not in elements:
+        elements[ename] = {
+            'resource_id': rid, 'text': text,
+            'content_desc': desc, 'clickable': clickable == 'true',
+            'bounds_by_device': {dev_key: [l, t, r, b]}
+        }
+        saved += 1
+    else:
+        elements[ename].setdefault('bounds_by_device', {})[dev_key] = [l, t, r, b]
+        updated += 1
+
+tmp = memory_file + '.tmp.' + str(os.getpid())
+with open(tmp, 'w') as f:
+    json.dump(data, f, indent=2)
+os.replace(tmp, memory_file)
+print(f'SNAPSHOT: {app_name}/{screen_name} — {saved} new, {updated} updated, {len(elements)} total elements')
 "
 }
 
@@ -876,6 +946,9 @@ case "${1:-help}" in
         ;;
     find-elements)
         find_elements "${2:-}"
+        ;;
+    snapshot-screen)
+        snapshot_screen "${2:-}" "${3:-}"
         ;;
     batchact)
         batch_actions "${2:-}"

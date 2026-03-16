@@ -127,17 +127,24 @@ Output shows each element with its center coordinates, attributes, and bounds:
 "$PD" launch "<app>" && sleep 1.5 && "$PD" find-elements
 ```
 
-### Save What You Learn
+### Save What You Learn (ONLY after verification)
 
-**After each SUCCESSFUL interaction**, save the element:
-```bash
-"$PD" memory save-element-full <app> <screen> <element_name> '{"resource_id":"<rid>","text":"<text>","content_desc":"<desc>","class":"<class>","clickable":true,"bounds_by_device":{"<device_key>":[left,top,right,bottom]}}'
-```
+**NEVER save until you've VERIFIED the action worked.** The flow is:
 
-Save screen transitions:
-```bash
-"$PD" memory save-transition <app> <old_screen> "tap <element>" <new_screen>
-```
+1. **Tap**: `"$PD" tap-on "Watchlist"`
+2. **Verify**: Check the new screen (via `find-elements` or screenshot) — did the right screen appear?
+3. **If CORRECT** → snapshot the screen and save the transition:
+   ```bash
+   "$PD" snapshot-screen <app> <new_screen_name> && "$PD" memory save-transition <app> <old_screen> "tap <element>" <new_screen>
+   ```
+   `snapshot-screen` captures ALL elements on the current screen and saves them to memory with device-specific bounds — in one call.
+
+4. **If WRONG** → save a correction:
+   ```bash
+   "$PD" memory save-correction <app> <screen> '{"wrong":"...","right":"...","reason":"..."}'
+   ```
+
+**`snapshot-screen` is the key command for memoization.** Call it every time you arrive at a new screen that you want to remember. It saves all visible elements with their bounds, so next time you can tap them directly without a UI dump.
 
 ### Save Corrections (Learn from Mistakes)
 
