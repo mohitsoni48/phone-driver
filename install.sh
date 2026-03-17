@@ -1,156 +1,162 @@
 #!/bin/bash
 # PhoneDriver Installer
 # Usage: curl -sL https://raw.githubusercontent.com/mohitsoni48/phone-driver/main/install.sh | bash
-#   or:  ./install.sh
+#   or:  git clone https://github.com/mohitsoni48/phone-driver.git && cd phone-driver && ./install.sh
 
 set -euo pipefail
 
 INSTALL_DIR="$HOME/.claude/phonedriver"
 COMMANDS_DIR="$HOME/.claude/commands"
-REPO_URL="https://raw.githubusercontent.com/mohitsoni48/phone-driver/main"
+REPO="mohitsoni48/phone-driver"
+REPO_URL="https://raw.githubusercontent.com/$REPO/main"
 
 echo "╔══════════════════════════════════════╗"
-echo "║    PhoneDriver Installer             ║"
-echo "║    AI-powered Android automation     ║"
+echo "║       PhoneDriver Installer          ║"
+echo "║   AI-powered Android automation      ║"
 echo "╚══════════════════════════════════════╝"
 echo ""
 
-# Check prerequisites
-check_prereqs() {
-    local missing=()
+# ── Prerequisites ──────────────────────────────────────────────────────
 
-    if ! command -v adb &>/dev/null; then
-        if [ -x "$HOME/Library/Android/sdk/platform-tools/adb" ]; then
-            echo "[ok] ADB found at ~/Library/Android/sdk/platform-tools/adb"
-        else
-            missing+=("adb")
-        fi
-    else
-        echo "[ok] ADB found at $(command -v adb)"
-    fi
+missing=()
 
-    if ! command -v python3 &>/dev/null; then
-        missing+=("python3")
-    else
-        echo "[ok] python3 found"
-    fi
+if command -v adb &>/dev/null; then
+    echo "[ok] ADB: $(command -v adb)"
+elif [ -x "$HOME/Library/Android/sdk/platform-tools/adb" ]; then
+    echo "[ok] ADB: ~/Library/Android/sdk/platform-tools/adb"
+elif [ -x "/usr/local/bin/adb" ]; then
+    echo "[ok] ADB: /usr/local/bin/adb"
+else
+    missing+=("adb")
+fi
 
-    if [ ${#missing[@]} -gt 0 ]; then
-        echo ""
-        echo "Missing prerequisites: ${missing[*]}"
-        echo ""
-        if [[ " ${missing[*]} " =~ " adb " ]]; then
-            echo "Install ADB:"
-            echo "  macOS:  brew install android-platform-tools"
-            echo "  Linux:  sudo apt install adb"
-            echo "  Or:     https://developer.android.com/tools/releases/platform-tools"
-        fi
-        if [[ " ${missing[*]} " =~ " python3 " ]]; then
-            echo "Install Python 3: https://python.org"
-        fi
-        exit 1
-    fi
-}
+if command -v python3 &>/dev/null; then
+    echo "[ok] python3: $(python3 --version 2>&1)"
+else
+    missing+=("python3")
+fi
 
-install_files() {
+if [ ${#missing[@]} -gt 0 ]; then
     echo ""
-    echo "Installing to $INSTALL_DIR ..."
-    mkdir -p "$INSTALL_DIR/scripts"
-    mkdir -p "$COMMANDS_DIR"
+    echo "MISSING: ${missing[*]}"
+    [[ " ${missing[*]} " =~ " adb " ]] && echo "  Install ADB: brew install android-platform-tools (macOS) or sudo apt install adb (Linux)"
+    [[ " ${missing[*]} " =~ " python3 " ]] && echo "  Install Python 3: https://python.org"
+    exit 1
+fi
 
-    # If running from the repo, copy local files
-    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || SCRIPT_DIR=""
+# ── Install ────────────────────────────────────────────────────────────
 
-    if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/scripts/adb-helpers.sh" ]; then
-        echo "  Installing from local repo: $SCRIPT_DIR"
-        cp "$SCRIPT_DIR/scripts/adb-helpers.sh" "$INSTALL_DIR/scripts/"
-        cp "$SCRIPT_DIR/scripts/memory-tree.py" "$INSTALL_DIR/scripts/"
-        cp "$SCRIPT_DIR/scripts/pd" "$INSTALL_DIR/scripts/" 2>/dev/null || true
+echo ""
+mkdir -p "$INSTALL_DIR/scripts"
+mkdir -p "$COMMANDS_DIR"
+
+# Detect: running from cloned repo or piped from curl?
+SCRIPT_DIR=""
+if [ -n "${BASH_SOURCE[0]:-}" ]; then
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || true
+fi
+
+FILES_OK=true
+
+if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/scripts/adb-helpers.sh" ]; then
+    echo "Installing from local clone..."
+    cp "$SCRIPT_DIR/scripts/adb-helpers.sh"  "$INSTALL_DIR/scripts/adb-helpers.sh"
+    cp "$SCRIPT_DIR/scripts/memory-tree.py"  "$INSTALL_DIR/scripts/memory-tree.py"
+    # Command prompt
+    if [ -f "$SCRIPT_DIR/.claude/commands/phone-driver.md" ]; then
         cp "$SCRIPT_DIR/.claude/commands/phone-driver.md" "$COMMANDS_DIR/phone-driver.md"
-        # Copy memory only if not already present (don't overwrite learned skills)
-        if [ ! -f "$INSTALL_DIR/memory.json" ]; then
-            if [ -f "$SCRIPT_DIR/.claude/commands/phonedriver-memory.json" ]; then
-                cp "$SCRIPT_DIR/.claude/commands/phonedriver-memory.json" "$INSTALL_DIR/memory.json"
-            fi
-        fi
-    else
-        echo "  Downloading from GitHub..."
-        curl -sL "$REPO_URL/scripts/adb-helpers.sh" -o "$INSTALL_DIR/scripts/adb-helpers.sh"
-        curl -sL "$REPO_URL/scripts/memory-tree.py" -o "$INSTALL_DIR/scripts/memory-tree.py"
-        curl -sL "$REPO_URL/.claude/commands/phone-driver.md" -o "$COMMANDS_DIR/phone-driver.md"
-        if [ ! -f "$INSTALL_DIR/memory.json" ]; then
-            curl -sL "$REPO_URL/.claude/commands/phonedriver-memory.json" -o "$INSTALL_DIR/memory.json"
+    elif [ -f "$SCRIPT_DIR/phone-driver.md" ]; then
+        cp "$SCRIPT_DIR/phone-driver.md" "$COMMANDS_DIR/phone-driver.md"
+    fi
+    # Seed memory (don't overwrite existing)
+    if [ ! -f "$INSTALL_DIR/memory.json" ]; then
+        if [ -f "$SCRIPT_DIR/.claude/commands/phonedriver-memory.json" ]; then
+            cp "$SCRIPT_DIR/.claude/commands/phonedriver-memory.json" "$INSTALL_DIR/memory.json"
+        elif [ -f "$SCRIPT_DIR/memory-seed.json" ]; then
+            cp "$SCRIPT_DIR/memory-seed.json" "$INSTALL_DIR/memory.json"
         fi
     fi
-
-    chmod +x "$INSTALL_DIR/scripts/adb-helpers.sh"
-    chmod +x "$INSTALL_DIR/scripts/memory-tree.py"
-    chmod +x "$INSTALL_DIR/scripts/pd" 2>/dev/null || true
-
-    echo "  [ok] Scripts installed"
-    echo "  [ok] Command installed"
-    if [ -f "$INSTALL_DIR/memory.json" ]; then
-        echo "  [ok] Memory initialized (existing memory preserved)"
-    fi
-}
-
-configure_permissions() {
-    local settings_file="$HOME/.claude/settings.json"
-
-    echo ""
-    echo "Configuring permissions..."
-
-    # Check if settings file exists and has permissions
-    if [ -f "$settings_file" ]; then
-        if python3 -c "
-import json, sys
-with open('$settings_file') as f: data = json.load(f)
-perms = data.get('permissions', {}).get('allow', [])
-needed = 'Bash(\$HOME/.claude/phonedriver/scripts/adb-helpers.sh *)'
-if needed in perms:
-    sys.exit(0)
-else:
-    sys.exit(1)
-" 2>/dev/null; then
-            echo "  [ok] Permissions already configured"
-            return
+else
+    echo "Downloading from GitHub..."
+    for f in scripts/adb-helpers.sh scripts/memory-tree.py; do
+        if ! curl -sfL "$REPO_URL/$f" -o "$INSTALL_DIR/$f"; then
+            echo "ERROR: Failed to download $f"
+            FILES_OK=false
+        fi
+    done
+    # Try both possible locations for the command file
+    if ! curl -sfL "$REPO_URL/.claude/commands/phone-driver.md" -o "$COMMANDS_DIR/phone-driver.md" 2>/dev/null; then
+        if ! curl -sfL "$REPO_URL/phone-driver.md" -o "$COMMANDS_DIR/phone-driver.md" 2>/dev/null; then
+            echo "ERROR: Failed to download phone-driver.md"
+            FILES_OK=false
         fi
     fi
+    # Seed memory
+    if [ ! -f "$INSTALL_DIR/memory.json" ]; then
+        curl -sfL "$REPO_URL/.claude/commands/phonedriver-memory.json" -o "$INSTALL_DIR/memory.json" 2>/dev/null || \
+        curl -sfL "$REPO_URL/memory-seed.json" -o "$INSTALL_DIR/memory.json" 2>/dev/null || \
+        echo '{"schema_version":2,"devices":{},"apps":{},"tasks":{},"settings_paths":{}}' > "$INSTALL_DIR/memory.json"
+    fi
+fi
 
+if [ "$FILES_OK" = false ]; then
     echo ""
-    echo "PhoneDriver needs these permissions to run without prompts:"
-    echo '  Bash($HOME/.claude/phonedriver/scripts/adb-helpers.sh *)'
-    echo '  Read(/tmp/phonedriver_*)'
-    echo ""
-    echo "Add them to ~/.claude/settings.json under permissions.allow,"
-    echo "or approve them when prompted during first use."
-}
+    echo "Some files failed to download. Try cloning instead:"
+    echo "  git clone https://github.com/$REPO.git && cd phone-driver && ./install.sh"
+    exit 1
+fi
 
-print_success() {
-    echo ""
-    echo "════════════════════════════════════════"
-    echo "  PhoneDriver installed successfully!"
-    echo "════════════════════════════════════════"
-    echo ""
-    echo "Usage (in Claude Code):"
-    echo '  /phone-driver "open Chrome and search for weather"'
-    echo '  /phone-driver "open Settings and enable WiFi"'
-    echo ""
-    echo "Prerequisites:"
-    echo "  - Android device connected via USB"
-    echo "  - USB debugging enabled on the device"
-    echo "  - Run 'adb devices' to verify connection"
-    echo ""
-    echo "Files installed:"
-    echo "  $COMMANDS_DIR/phone-driver.md"
-    echo "  $INSTALL_DIR/scripts/adb-helpers.sh"
-    echo "  $INSTALL_DIR/scripts/memory-tree.py"
-    echo "  $INSTALL_DIR/memory.json"
-    echo ""
-}
+# Make executable
+chmod +x "$INSTALL_DIR/scripts/adb-helpers.sh"
+chmod +x "$INSTALL_DIR/scripts/memory-tree.py"
 
-# Run
-check_prereqs
-install_files
-configure_permissions
-print_success
+# Create the PD runner script — this is what the command prompt calls.
+# It's a bash wrapper that ensures adb-helpers.sh runs under bash (not zsh).
+cat > "$INSTALL_DIR/pd" << 'PDEOF'
+#!/bin/bash
+exec /bin/bash "$(dirname "$0")/scripts/adb-helpers.sh" "$@"
+PDEOF
+chmod +x "$INSTALL_DIR/pd"
+
+echo ""
+echo "[ok] Scripts installed"
+echo "[ok] Command installed"
+echo "[ok] Runner installed at $INSTALL_DIR/pd"
+[ -f "$INSTALL_DIR/memory.json" ] && echo "[ok] Memory ready (existing skills preserved)"
+
+# ── Verify ─────────────────────────────────────────────────────────────
+
+echo ""
+echo "Verifying..."
+if bash "$INSTALL_DIR/scripts/adb-helpers.sh" help > /dev/null 2>&1; then
+    echo "[ok] adb-helpers.sh runs correctly"
+else
+    echo "[!!] adb-helpers.sh failed — check bash is available"
+fi
+
+if "$INSTALL_DIR/pd" help > /dev/null 2>&1; then
+    echo "[ok] pd runner works"
+else
+    echo "[!!] pd runner failed"
+fi
+
+# ── Done ───────────────────────────────────────────────────────────────
+
+echo ""
+echo "════════════════════════════════════════"
+echo "  PhoneDriver installed!"
+echo "════════════════════════════════════════"
+echo ""
+echo "Usage (in Claude Code):"
+echo '  /phone-driver "open Chrome and search for weather"'
+echo '  /phone-driver "open Settings and enable WiFi"'
+echo ""
+echo "Files:"
+echo "  $COMMANDS_DIR/phone-driver.md       ← command"
+echo "  $INSTALL_DIR/pd                     ← runner"
+echo "  $INSTALL_DIR/scripts/               ← scripts"
+echo "  $INSTALL_DIR/memory.json            ← learned skills"
+echo ""
+echo "Tip: First run will ask for permission to execute ADB commands."
+echo "     Approve once and it remembers."
+echo ""

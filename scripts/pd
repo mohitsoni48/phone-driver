@@ -1,4 +1,0 @@
-#!/bin/bash
-# pd — wrapper for adb-helpers.sh that ensures bash execution
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-exec "$SCRIPT_DIR/adb-helpers.sh" "$@"

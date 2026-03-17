@@ -19,27 +19,28 @@ The user's task is: $ARGUMENTS
 
 ## CRITICAL RULES
 
-1. **ALL commands go through `$PD`** (the helper script). Never call bare `adb`.
-2. **To tap ANY element, use `"$PD" tap-on "<element text>"`** — NEVER calculate coordinates yourself.
-3. **To open ANY app, use `"$PD" launch <name>`** — never visually search for apps.
+1. **ALL commands go through `pd`** (function set in Phase 0). Never call bare `adb`.
+2. **To tap ANY element, use `pd tap-on "<element text>"`** — NEVER calculate coordinates yourself.
+3. **To open ANY app, use `pd launch <name>`** — never visually search for apps.
 4. **Read your skill library FIRST** — decompose the task and reuse known skills.
 5. **Save every new skill** so it can be replayed next time.
 6. **Minimize tool calls.** Chain with `&&`. Target 1 Bash call per cycle.
 7. **Run autonomously** — only ask the user when truly blocked.
 
-## Phase 0: Resolve Paths + Device Selection + Load Skills
+## Phase 0: Setup + Device Selection + Load Skills
 
-**FIRST**, set the `PD` variable. Run this **before anything else**:
-
-```bash
-PD=""; for p in ~/.claude/phonedriver/scripts/pd ./scripts/pd; do [ -x "$p" ] && PD="$p" && break; done; if [ -z "$PD" ]; then echo "ERROR: PhoneDriver not installed. Run: curl -sL https://raw.githubusercontent.com/mohitsoni48/phone-driver-skill/main/install.sh | bash"; else echo "PD=$PD"; fi
-```
-
-**THEN** check device and load skills:
+**Run this FIRST.** Defines the `pd` function and loads everything:
 
 ```bash
-"$PD" check && echo "=== Resolution ===" && "$PD" resolution && echo "=== DeviceKey ===" && "$PD" devicekey && echo "=== Skills ===" && "$PD" memory list-skills $("$PD" devicekey)
+pd() { /bin/bash "$HOME/.claude/phonedriver/pd" "$@"; } && pd check && echo "=== Resolution ===" && pd resolution && echo "=== DeviceKey ===" && pd devicekey && echo "=== Skills ===" && pd memory list-skills $(pd devicekey)
 ```
+
+If it says `not found` or `No such file` — tell the user to install first:
+```
+curl -sL https://raw.githubusercontent.com/mohitsoni48/phone-driver/main/install.sh | bash
+```
+
+After this, use `pd` (the function) for ALL commands. Example: `pd tap-on "Settings"`, `pd launch chrome`, `pd find-elements`.
 
 ### Device Selection Rules
 
@@ -49,11 +50,11 @@ The `check` command handles device selection automatically:
 - **1 device** → Automatically locked for the session. All commands target this device only.
 - **2+ devices** → Output starts with `MULTIPLE_DEVICES:` with a numbered list. **Ask the user which device to use**, then lock it:
   ```bash
-  "$PD" select-device <device_id>
+  pd select-device <device_id>
   ```
   After selection, re-run the skills load.
 
-Once a device is locked, ALL subsequent ADB commands automatically target that device — even if other devices are connected or disconnected during the session. The lock persists until `"$PD" release-device` is called.
+Once a device is locked, ALL subsequent ADB commands automatically target that device — even if other devices are connected or disconnected during the session. The lock persists until `pd release-device` is called.
 
 Note the **device key** (format: `Model__WIDTHxHEIGHT`) for memory operations.
 
@@ -69,15 +70,15 @@ Read the skill library. Decompose the task and decide which parts you already kn
 ### Executing a Known Task
 
 ```bash
-"$PD" memory get-replay <task_id> <device_key> param1=value1
+pd memory get-replay <task_id> <device_key> param1=value1
 ```
 
 If `REPLAY:` → pass **exactly as-is** to batchact:
 ```bash
-"$PD" batchact "<exact_string_after_REPLAY:>"
+pd batchact "<exact_string_after_REPLAY:>"
 ```
 
-If `NO_COMPILED` → compile first: `"$PD" memory compile-task <task_id> <device_key>`
+If `NO_COMPILED` → compile first: `pd memory compile-task <task_id> <device_key>`
 
 ## Phase 2: Discover Unknown Steps
 
@@ -87,10 +88,10 @@ For steps NOT covered by existing skills. Max 15 cycles.
 
 **Tap by element text, content-desc, or resource-id** (the script does the UI dump, finds the element, computes center, and taps — all in one call):
 ```bash
-"$PD" tap-on "Settings"
-"$PD" tap-on "Search or type URL"
-"$PD" tap-on "menu_button"
-"$PD" tap-on "com.android.chrome:id/search_box_text"
+pd tap-on "Settings"
+pd tap-on "Search or type URL"
+pd tap-on "menu_button"
+pd tap-on "com.android.chrome:id/search_box_text"
 ```
 
 The output tells you exactly what was tapped:
@@ -106,12 +107,12 @@ HINT: Available elements: Settings, Chrome, Camera, ...
 
 **To see all elements on screen** (useful when exploring a new screen):
 ```bash
-"$PD" find-elements
+pd find-elements
 ```
 
 **To filter elements by keyword:**
 ```bash
-"$PD" find-elements "search"
+pd find-elements "search"
 ```
 
 Output shows each element with its center coordinates, attributes, and bounds:
@@ -124,24 +125,24 @@ Output shows each element with its center coordinates, attributes, and bounds:
 
 ### Launch App
 ```bash
-"$PD" launch "<app>" && sleep 1.5 && "$PD" find-elements
+pd launch "<app>" && sleep 1.5 && pd find-elements
 ```
 
 ### Save What You Learn (ONLY after verification)
 
 **NEVER save until you've VERIFIED the action worked.** The flow is:
 
-1. **Tap**: `"$PD" tap-on "Watchlist"`
+1. **Tap**: `pd tap-on "Watchlist"`
 2. **Verify**: Check the new screen (via `find-elements` or screenshot) — did the right screen appear?
 3. **If CORRECT** → snapshot the screen and save the transition:
    ```bash
-   "$PD" snapshot-screen <app> <new_screen_name> && "$PD" memory save-transition <app> <old_screen> "tap <element>" <new_screen>
+   pd snapshot-screen <app> <new_screen_name> && pd memory save-transition <app> <old_screen> "tap <element>" <new_screen>
    ```
    `snapshot-screen` captures ALL elements on the current screen and saves them to memory with device-specific bounds — in one call.
 
 4. **If WRONG** → save a correction:
    ```bash
-   "$PD" memory save-correction <app> <screen> '{"wrong":"...","right":"...","reason":"..."}'
+   pd memory save-correction <app> <screen> '{"wrong":"...","right":"...","reason":"..."}'
    ```
 
 **`snapshot-screen` is the key command for memoization.** Call it every time you arrive at a new screen that you want to remember. It saves all visible elements with their bounds, so next time you can tap them directly without a UI dump.
@@ -150,19 +151,19 @@ Output shows each element with its center coordinates, attributes, and bounds:
 
 **After a WRONG tap or failed action**, save a correction so you never repeat it:
 ```bash
-"$PD" memory save-correction <app> <screen> '{"wrong":"<what you did wrong>","right":"<what to do instead>","reason":"<why it was wrong>"}'
+pd memory save-correction <app> <screen> '{"wrong":"<what you did wrong>","right":"<what to do instead>","reason":"<why it was wrong>"}'
 ```
 
 **Examples:**
 ```bash
 # Tapped the wrong "Search" — voice icon instead of text bar
-"$PD" memory save-correction chrome home '{"wrong":"tap-on Search (matches voice search icon)","right":"tap-on Search or type URL (the text bar)","reason":"Multiple elements match Search — use the full text label"}'
+pd memory save-correction chrome home '{"wrong":"tap-on Search (matches voice search icon)","right":"tap-on Search or type URL (the text bar)","reason":"Multiple elements match Search — use the full text label"}'
 
 # Tapped a non-clickable area
-"$PD" memory save-correction settings wifi_screen '{"wrong":"tap-on Wi-Fi text label","right":"tap-on the toggle switch to the right","reason":"The label text is not clickable, only the switch is"}'
+pd memory save-correction settings wifi_screen '{"wrong":"tap-on Wi-Fi text label","right":"tap-on the toggle switch to the right","reason":"The label text is not clickable, only the switch is"}'
 
 # Wrong screen appeared after tap
-"$PD" memory save-correction chrome home '{"wrong":"tap-on menu_button expecting settings","right":"tap-on menu_button then look for Settings in dropdown","reason":"menu_button opens a popup menu, not settings directly"}'
+pd memory save-correction chrome home '{"wrong":"tap-on menu_button expecting settings","right":"tap-on menu_button then look for Settings in dropdown","reason":"menu_button opens a popup menu, not settings directly"}'
 ```
 
 **IMPORTANT**: The skill library shows corrections as warnings (⚠ AVOID). Always check these before acting on a screen — they tell you what NOT to do.
@@ -175,20 +176,20 @@ Corrections save you from:
 
 ### Text Input
 ```bash
-"$PD" adb shell input text 'hello%sworld'
+pd adb shell input text 'hello%sworld'
 ```
-Spaces must be `%s`. Tap the input field first with `"$PD" tap-on`.
+Spaces must be `%s`. Tap the input field first with `pd tap-on`.
 
 ### Key Events
 ```bash
-"$PD" adb shell input keyevent KEYCODE_ENTER
-"$PD" adb shell input keyevent KEYCODE_BACK
+pd adb shell input keyevent KEYCODE_ENTER
+pd adb shell input keyevent KEYCODE_BACK
 ```
 
 ### Vision Fallback (Tier 3)
 Only if `tap-on` and `find-elements` return empty (games, canvas, webviews):
 ```bash
-"$PD" screenshot
+pd screenshot
 ```
 Then: `Read /tmp/phonedriver_screen.png`
 
@@ -209,7 +210,7 @@ Parameterize dynamic values: "search for weather" → `text={query}`, note `quer
 After completing a task with new steps:
 
 ```bash
-"$PD" memory save-task "<task_id>" '{
+pd memory save-task "<task_id>" '{
   "pattern": "<natural language with {params}>",
   "pattern_aliases": ["<alternative phrasings>"],
   "app": "<primary_app>",
@@ -224,12 +225,12 @@ After completing a task with new steps:
 
 Compile for instant replay:
 ```bash
-"$PD" memory compile-task "<task_id>" "<device_key>"
+pd memory compile-task "<task_id>" "<device_key>"
 ```
 
 Save device info:
 ```bash
-"$PD" memory save-device
+pd memory save-device
 ```
 
 **If this task EXTENDS an existing skill**, save as a NEW task with ALL steps.
@@ -252,7 +253,7 @@ New skills saved: [list]
 ## Batch Action DSL Reference
 
 ```bash
-"$PD" batchact "launch chrome; waitfor search_box 10; tap Search; text 'hello'; key KEYCODE_ENTER"
+pd batchact "launch chrome; waitfor search_box 10; tap Search; text 'hello'; key KEYCODE_ENTER"
 ```
 
 | Command | What it does |
@@ -267,7 +268,7 @@ New skills saved: [list]
 | `sleep <secs>` | Wait (avoid — prefer `waitfor`) |
 | `intent <action>` | Launch settings/activity by intent action |
 
-**NEVER manually calculate coordinates.** Use `"$PD" tap-on` or `tap <element_text>` in batchact.
+**NEVER manually calculate coordinates.** Use `pd tap-on` or `tap <element_text>` in batchact.
 
 ## Safety Rules
 
