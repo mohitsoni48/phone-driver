@@ -933,6 +933,8 @@ case "${1:-help}" in
                 ;;
             list-skills)    python3 "$MEMORY_TREE" list-skills "${3:-}" ;;
             save-correction) python3 "$MEMORY_TREE" save-correction "${3:-}" "${4:-}" "${5:-}" ;;
+            find-path)      python3 "$MEMORY_TREE" find-path "${3:-}" "${4:-}" "${5:-}" ;;
+            nav-info)       python3 "$MEMORY_TREE" nav-info "${3:-}" ;;
             save-device)
                 local model res ver did
                 model=$(adb_cmd shell getprop ro.product.model 2>/dev/null | tr -d '\r')

@@ -61,6 +61,159 @@ def bounds_center(bounds):
     return ((bounds[0] + bounds[2]) // 2, (bounds[1] + bounds[3]) // 2)
 
 
+# ── Union-Find for Screen Deduplication ────────────────────────────────
+
+class ScreenUnionFind:
+    """
+    Union-Find (Disjoint Set) for screen deduplication.
+    Maps structural signatures → canonical screen names.
+    Stored in memory.json under apps.<app>.screen_uf
+    """
+
+    def __init__(self, uf_data=None):
+        # parent: signature → signature (path compression)
+        # names: signature → canonical screen name
+        self.parent = {}
+        self.names = {}
+        self.rank = {}
+        if uf_data:
+            self.parent = dict(uf_data.get("parent", {}))
+            self.names = dict(uf_data.get("names", {}))
+            self.rank = {k: int(v) for k, v in uf_data.get("rank", {}).items()}
+
+    def to_dict(self):
+        return {"parent": self.parent, "names": self.names, "rank": self.rank}
+
+    def find(self, sig):
+        """Find canonical signature with path compression."""
+        if sig not in self.parent:
+            self.parent[sig] = sig
+            self.rank[sig] = 0
+            return sig
+        if self.parent[sig] != sig:
+            self.parent[sig] = self.find(self.parent[sig])
+        return self.parent[sig]
+
+    def union(self, sig_a, sig_b):
+        """Union two signatures. Returns the canonical signature."""
+        root_a = self.find(sig_a)
+        root_b = self.find(sig_b)
+        if root_a == root_b:
+            return root_a
+        # Union by rank
+        if self.rank.get(root_a, 0) < self.rank.get(root_b, 0):
+            self.parent[root_a] = root_b
+            # Keep the name of the higher-rank root
+            return root_b
+        elif self.rank.get(root_a, 0) > self.rank.get(root_b, 0):
+            self.parent[root_b] = root_a
+            return root_a
+        else:
+            self.parent[root_b] = root_a
+            self.rank[root_a] = self.rank.get(root_a, 0) + 1
+            return root_a
+
+    def get_name(self, sig):
+        """Get the canonical screen name for a signature."""
+        root = self.find(sig)
+        return self.names.get(root)
+
+    def set_name(self, sig, name):
+        """Set the screen name for a signature's canonical root."""
+        root = self.find(sig)
+        self.names[root] = name
+
+    def has(self, sig):
+        """Check if a signature is in the UF."""
+        return sig in self.parent
+
+
+# ── Navigation Trie for Path Queries ──────────────────────────────────
+
+class NavTrie:
+    """
+    Trie (prefix tree) for navigation paths through app screens.
+    Each node = a screen. Each edge = a tap action.
+    Enables: shortest path, prefix matching, path completion.
+
+    Stored in memory.json under apps.<app>.nav_trie
+    Structure: { "root": "home", "edges": { "screen_a": { "tap element": "screen_b", ... }, ... } }
+    """
+
+    def __init__(self, trie_data=None):
+        self.root = None
+        self.edges = {}  # screen → { action → target_screen }
+        if trie_data:
+            self.root = trie_data.get("root")
+            self.edges = {k: dict(v) for k, v in trie_data.get("edges", {}).items()}
+
+    def to_dict(self):
+        return {"root": self.root, "edges": self.edges}
+
+    def add_edge(self, from_screen, action, to_screen):
+        """Add a navigation edge."""
+        self.edges.setdefault(from_screen, {})[action] = to_screen
+
+    def set_root(self, screen):
+        """Set the root/home screen."""
+        self.root = screen
+
+    def find_path(self, from_screen, to_screen, max_depth=10):
+        """BFS shortest path from one screen to another. Returns list of (screen, action) tuples."""
+        if from_screen == to_screen:
+            return []
+
+        from collections import deque
+        queue = deque([(from_screen, [])])
+        visited = {from_screen}
+
+        while queue:
+            current, path = queue.popleft()
+            if len(path) >= max_depth:
+                continue
+            for action, target in self.edges.get(current, {}).items():
+                if target == to_screen:
+                    return path + [(current, action)]
+                if target not in visited:
+                    visited.add(target)
+                    queue.append((target, path + [(current, action)]))
+        return None  # No path found
+
+    def find_path_from_root(self, to_screen):
+        """Find path from root/home to a target screen."""
+        if not self.root:
+            return None
+        return self.find_path(self.root, to_screen)
+
+    def reachable_from(self, screen):
+        """Return all screens reachable from a given screen with their paths."""
+        from collections import deque
+        result = {}
+        queue = deque([(screen, [])])
+        visited = {screen}
+
+        while queue:
+            current, path = queue.popleft()
+            for action, target in self.edges.get(current, {}).items():
+                if target not in visited:
+                    visited.add(target)
+                    target_path = path + [(current, action)]
+                    result[target] = target_path
+                    queue.append((target, target_path))
+        return result
+
+    def all_screens(self):
+        """Return all known screen names."""
+        screens = set()
+        for src, actions in self.edges.items():
+            screens.add(src)
+            for target in actions.values():
+                screens.add(target)
+        if self.root:
+            screens.add(self.root)
+        return screens
+
+
 # ── Screen Identity (structural, ignores dynamic text) ────────────────
 
 def _structural_signature(xml_path):
@@ -198,9 +351,7 @@ def _merge_screen_elements(screen_data, new_elements, device_key):
 def cmd_tap_and_memo(xml_before_path, xml_after_path, query, device_key, index=0):
     """
     Core memoization logic called after a tap.
-    - Identifies before/after screens by structural signature
-    - Merges elements into existing screens (or creates new ones)
-    - Records transitions if screen changed
+    Uses Union-Find for screen dedup and NavTrie for navigation paths.
     """
     data = load_memory()
 
@@ -229,33 +380,151 @@ def cmd_tap_and_memo(xml_before_path, xml_after_path, query, device_key, index=0
     app = data["apps"][app_name]
     screens = app.setdefault("screens", {})
 
-    # Find or create BEFORE screen
-    before_screen = _find_screen_by_signature(app, before_sig)
-    if not before_screen:
-        before_screen = _auto_name_screen(app, before_elements)
+    # Load Union-Find and NavTrie
+    uf = ScreenUnionFind(app.get("screen_uf"))
+    trie = NavTrie(app.get("nav_trie"))
+
+    # Resolve BEFORE screen via Union-Find
+    if uf.has(before_sig):
+        before_screen = uf.get_name(before_sig)
+    else:
+        # Check legacy signature lookup
+        before_screen = _find_screen_by_signature(app, before_sig)
+        if not before_screen:
+            before_screen = _auto_name_screen(app, before_elements)
+        uf.set_name(before_sig, before_screen)
+
+    # Set root if this is the first screen we see for this app
+    if not trie.root:
+        trie.set_root(before_screen)
+
     screen_before_data = screens.setdefault(before_screen, {"identifiers": {}, "elements": {}, "transitions": {}})
     screen_before_data["identifiers"]["signature"] = before_sig
     saved_b, updated_b = _merge_screen_elements(screen_before_data, before_elements, device_key)
 
     if screen_changed:
-        # Find or create AFTER screen
-        after_screen = _find_screen_by_signature(app, after_sig)
-        if not after_screen:
-            after_screen = _auto_name_screen(app, after_elements)
+        # Resolve AFTER screen via Union-Find
+        if uf.has(after_sig):
+            after_screen = uf.get_name(after_sig)
+        else:
+            after_screen = _find_screen_by_signature(app, after_sig)
+            if not after_screen:
+                after_screen = _auto_name_screen(app, after_elements)
+            uf.set_name(after_sig, after_screen)
+
         screen_after_data = screens.setdefault(after_screen, {"identifiers": {}, "elements": {}, "transitions": {}})
         screen_after_data["identifiers"]["signature"] = after_sig
         saved_a, updated_a = _merge_screen_elements(screen_after_data, after_elements, device_key)
 
-        # Save transition
+        # Record transition in both legacy dict and NavTrie
         tap_label = re.sub(r"[^a-zA-Z0-9_]", "_", query.lower().strip())[:30]
-        screen_before_data.setdefault("transitions", {})[f"tap {tap_label}"] = after_screen
+        action_key = f"tap {tap_label}"
+        screen_before_data.setdefault("transitions", {})[action_key] = after_screen
+        trie.add_edge(before_screen, action_key, after_screen)
 
+        # Persist UF and Trie
+        app["screen_uf"] = uf.to_dict()
+        app["nav_trie"] = trie.to_dict()
         save_memory(data)
-        print(f"MEMO: {app_name}/{before_screen} →tap \"{query}\"→ {app_name}/{after_screen} (before:{saved_b}new+{updated_b}upd, after:{saved_a}new+{updated_a}upd)")
+        print(f"MEMO: {app_name}/{before_screen} →tap \"{query}\"→ {app_name}/{after_screen} ({saved_b}+{saved_a} new)")
     else:
+        app["screen_uf"] = uf.to_dict()
+        app["nav_trie"] = trie.to_dict()
         save_memory(data)
         if saved_b > 0:
             print(f"MEMO: {saved_b} new elements on {app_name}/{before_screen}")
+
+
+def cmd_find_path(app_name, target_screen, from_screen=None):
+    """Find navigation path to a target screen using the NavTrie."""
+    data = load_memory()
+    app = data.get("apps", {}).get(app_name)
+    if not app:
+        print(f"ERROR: App '{app_name}' not found")
+        sys.exit(1)
+
+    trie = NavTrie(app.get("nav_trie"))
+    if not trie.root and not from_screen:
+        print("NO_PATH: No navigation graph built yet for this app")
+        return
+
+    if from_screen:
+        path = trie.find_path(from_screen, target_screen)
+    else:
+        path = trie.find_path_from_root(target_screen)
+
+    if path is None:
+        print(f"NO_PATH: Cannot reach '{target_screen}' from '{from_screen or trie.root}'")
+        # Show reachable screens as hints
+        reachable = trie.reachable_from(from_screen or trie.root)
+        if reachable:
+            print(f"REACHABLE: {', '.join(sorted(reachable.keys())[:10])}")
+        return
+
+    # Output the path as actionable steps
+    print(f"PATH ({len(path)} steps):")
+    for screen, action in path:
+        print(f"  {screen} → {action}")
+    print(f"  → {target_screen}")
+
+    # Also output as batchact-compatible tap sequence
+    # Look up element bounds for each step
+    device_keys = set()
+    for sname, sdata in app.get("screens", {}).items():
+        for el in sdata.get("elements", {}).values():
+            device_keys.update(el.get("bounds_by_device", {}).keys())
+
+    if device_keys:
+        dev_key = list(device_keys)[0]  # Use first known device
+        commands = []
+        for screen, action in path:
+            # action is like "tap element_name"
+            el_name = action.replace("tap ", "").strip()
+            screen_data = app.get("screens", {}).get(screen, {})
+            element = screen_data.get("elements", {}).get(el_name, {})
+            bounds = element.get("bounds_by_device", {}).get(dev_key)
+            if bounds:
+                cx, cy = bounds_center(bounds)
+                commands.append(f"tap {cx} {cy}")
+                commands.append("sleep 1.5")
+            else:
+                commands.append(f"tap-on {el_name}")
+                commands.append("sleep 1.5")
+        if commands:
+            print(f"BATCHACT: {'; '.join(commands)}")
+
+
+def cmd_nav_info(app_name):
+    """Show the navigation graph for an app."""
+    data = load_memory()
+    app = data.get("apps", {}).get(app_name)
+    if not app:
+        print(f"ERROR: App '{app_name}' not found")
+        sys.exit(1)
+
+    trie = NavTrie(app.get("nav_trie"))
+    uf = ScreenUnionFind(app.get("screen_uf"))
+
+    print(f"App: {app_name}")
+    print(f"Root screen: {trie.root or '(not set)'}")
+    print(f"Screens in graph: {len(trie.all_screens())}")
+    print(f"Signatures in UF: {len(uf.parent)}")
+    print()
+
+    # Show navigation graph
+    if trie.root:
+        reachable = trie.reachable_from(trie.root)
+        print(f"Reachable from root ({trie.root}):")
+        for screen, path in sorted(reachable.items()):
+            steps = " → ".join(f"{s}[{a}]" for s, a in path)
+            print(f"  {screen}: {steps}")
+    print()
+
+    # Show all edges
+    print("All edges:")
+    for src, actions in sorted(trie.edges.items()):
+        for action, target in sorted(actions.items()):
+            print(f"  {src} --[{action}]--> {target}")
 
 
 def cmd_cleanup_screens():
@@ -894,38 +1163,51 @@ def cmd_list_skills(device_key=None):
     data = load_memory()
     lines = []
 
-    # Apps with launch intents
+    # Apps with navigation graphs
     lines.append("## Known Apps")
     for name, app in sorted(data.get("apps", {}).items()):
         aliases = ", ".join(app.get("aliases", []))
         has_screens = bool(app.get("screens"))
         screen_count = len(app.get("screens", {}))
-        intent = app.get("launch_intent", "")
         status = f"{screen_count} screens mapped" if has_screens else "launch only"
         lines.append(f"- **{name}** ({status}): aliases=[{aliases}]")
+
         if has_screens:
+            trie = NavTrie(app.get("nav_trie"))
+            if trie.root:
+                lines.append(f"  root: `{trie.root}`")
+                # Show navigation graph compactly
+                reachable = trie.reachable_from(trie.root)
+                for target, path in sorted(reachable.items()):
+                    steps = " → ".join(a for _, a in path)
+                    lines.append(f"  `{trie.root}` → {steps} → `{target}`")
+            else:
+                # Fallback: show screens with transitions
+                for sname, screen in app["screens"].items():
+                    clickable_els = [e for e, d in screen.get("elements", {}).items() if d.get("clickable")]
+                    transitions = screen.get("transitions", {})
+                    has_bounds = False
+                    if device_key:
+                        has_bounds = any(
+                            device_key in el.get("bounds_by_device", {})
+                            for el in screen.get("elements", {}).values()
+                        )
+                    bounds_note = " [bounds]" if has_bounds else ""
+                    lines.append(f"  - `{sname}`: clickable=[{', '.join(clickable_els[:8])}]{bounds_note}")
+                    for action, target in transitions.items():
+                        lines.append(f"    → {action} → `{target}`")
+
+            # Corrections
             for sname, screen in app["screens"].items():
-                elements = list(screen.get("elements", {}).keys())
-                transitions = screen.get("transitions", {})
-                has_bounds = False
-                if device_key:
-                    has_bounds = any(
-                        device_key in el.get("bounds_by_device", {})
-                        for el in screen.get("elements", {}).values()
-                    )
-                bounds_note = " [bounds: this device]" if has_bounds else ""
-                lines.append(f"  - screen `{sname}`: elements=[{', '.join(elements)}]{bounds_note}")
-                for action, target in transitions.items():
-                    lines.append(f"    → {action} → `{target}`")
                 for correction in screen.get("corrections", []):
                     wrong = correction.get("wrong", "")
                     right = correction.get("right", "")
                     reason = correction.get("reason", "")
-                    lines.append(f"    ⚠ AVOID: {wrong}")
+                    lines.append(f"  ⚠ AVOID on `{sname}`: {wrong}")
                     if right:
-                        lines.append(f"      USE INSTEAD: {right}")
+                        lines.append(f"    USE INSTEAD: {right}")
                     if reason:
-                        lines.append(f"      REASON: {reason}")
+                        lines.append(f"    REASON: {reason}")
 
     # Tasks with replay commands
     lines.append("")
@@ -1062,6 +1344,10 @@ def main():
                          int(sys.argv[6]) if len(sys.argv) > 6 else 0)
     elif cmd == "cleanup-screens":
         cmd_cleanup_screens()
+    elif cmd == "find-path":
+        cmd_find_path(sys.argv[2], sys.argv[3], sys.argv[4] if len(sys.argv) > 4 else None)
+    elif cmd == "nav-info":
+        cmd_nav_info(sys.argv[2])
     else:
         print(f"Unknown command: {cmd}")
         sys.exit(1)
