@@ -2,12 +2,5 @@
   "name": "phone-driver",
   "version": "1.0.0",
   "description": "AI-powered Android device automation via ADB with skill memory and instant task replay",
-  "author": {
-    "name": "Mohit Soni"
-  },
-  "repository": "https://github.com/mohitsoni48/phone-driver",
-  "license": "MIT",
-  "keywords": ["android", "adb", "automation", "mobile", "device-testing"],
-  "commands": ["commands/phone-driver.md"],
-  "installMessage": "PhoneDriver installed! Use /phone-driver \"open Chrome\" to start.\nRequires: ADB + Android device with USB debugging enabled."
+  "skills": "./skills/"
 }

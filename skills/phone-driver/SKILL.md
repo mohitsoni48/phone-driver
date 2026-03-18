@@ -1,4 +1,5 @@
 ---
+name: phone-driver
 description: Control an Android device using visual understanding and ADB. Captures screenshots, analyzes them, and performs actions.
 argument-hint: <task description, e.g. "open Chrome and search for weather">
 allowed-tools: Bash, Read
