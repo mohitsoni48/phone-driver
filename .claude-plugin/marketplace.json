@@ -6,10 +6,7 @@
   "plugins": [
     {
       "name": "phone-driver",
-      "source": {
-        "source": "git",
-        "url": "https://github.com/mohitsoni48/phone-driver.git"
-      },
+      "source": "./",
       "description": "AI-powered Android device automation via ADB with skill memory and instant task replay",
       "version": "1.0.0",
       "author": {
@@ -17,7 +14,8 @@
       },
       "homepage": "https://github.com/mohitsoni48/phone-driver",
       "repository": "https://github.com/mohitsoni48/phone-driver",
-      "license": "Apache-2.0"
+      "license": "Apache-2.0",
+      "keywords": ["android", "adb", "automation", "mobile"]
     }
   ]
 }
