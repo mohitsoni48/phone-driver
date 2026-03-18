@@ -62,17 +62,14 @@ if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/scripts/adb-helpers.sh" ]; then
     echo "Installing from local clone..."
     cp "$SCRIPT_DIR/scripts/adb-helpers.sh"  "$INSTALL_DIR/scripts/adb-helpers.sh"
     cp "$SCRIPT_DIR/scripts/memory-tree.py"  "$INSTALL_DIR/scripts/memory-tree.py"
+    cp "$SCRIPT_DIR/scripts/pd"              "$INSTALL_DIR/scripts/pd"
     # Command prompt
-    if [ -f "$SCRIPT_DIR/.claude/commands/phone-driver.md" ]; then
-        cp "$SCRIPT_DIR/.claude/commands/phone-driver.md" "$COMMANDS_DIR/phone-driver.md"
-    elif [ -f "$SCRIPT_DIR/phone-driver.md" ]; then
-        cp "$SCRIPT_DIR/phone-driver.md" "$COMMANDS_DIR/phone-driver.md"
+    if [ -f "$SCRIPT_DIR/commands/phone-driver.md" ]; then
+        cp "$SCRIPT_DIR/commands/phone-driver.md" "$COMMANDS_DIR/phone-driver.md"
     fi
     # Seed memory (don't overwrite existing)
     if [ ! -f "$INSTALL_DIR/memory.json" ]; then
-        if [ -f "$SCRIPT_DIR/.claude/commands/phonedriver-memory.json" ]; then
-            cp "$SCRIPT_DIR/.claude/commands/phonedriver-memory.json" "$INSTALL_DIR/memory.json"
-        elif [ -f "$SCRIPT_DIR/memory-seed.json" ]; then
+        if [ -f "$SCRIPT_DIR/memory-seed.json" ]; then
             cp "$SCRIPT_DIR/memory-seed.json" "$INSTALL_DIR/memory.json"
         fi
     fi
@@ -84,16 +81,16 @@ else
             FILES_OK=false
         fi
     done
-    # Try both possible locations for the command file
-    if ! curl -sfL "$REPO_URL/.claude/commands/phone-driver.md" -o "$COMMANDS_DIR/phone-driver.md" 2>/dev/null; then
-        if ! curl -sfL "$REPO_URL/phone-driver.md" -o "$COMMANDS_DIR/phone-driver.md" 2>/dev/null; then
-            echo "ERROR: Failed to download phone-driver.md"
-            FILES_OK=false
-        fi
+    if ! curl -sfL "$REPO_URL/commands/phone-driver.md" -o "$COMMANDS_DIR/phone-driver.md" 2>/dev/null; then
+        echo "ERROR: Failed to download phone-driver.md"
+        FILES_OK=false
+    fi
+    if ! curl -sfL "$REPO_URL/scripts/pd" -o "$INSTALL_DIR/scripts/pd" 2>/dev/null; then
+        echo "ERROR: Failed to download pd wrapper"
+        FILES_OK=false
     fi
     # Seed memory
     if [ ! -f "$INSTALL_DIR/memory.json" ]; then
-        curl -sfL "$REPO_URL/.claude/commands/phonedriver-memory.json" -o "$INSTALL_DIR/memory.json" 2>/dev/null || \
         curl -sfL "$REPO_URL/memory-seed.json" -o "$INSTALL_DIR/memory.json" 2>/dev/null || \
         echo '{"schema_version":2,"devices":{},"apps":{},"tasks":{},"settings_paths":{}}' > "$INSTALL_DIR/memory.json"
     fi
@@ -109,19 +106,11 @@ fi
 # Make executable
 chmod +x "$INSTALL_DIR/scripts/adb-helpers.sh"
 chmod +x "$INSTALL_DIR/scripts/memory-tree.py"
-
-# Create the PD runner script — this is what the command prompt calls.
-# It's a bash wrapper that ensures adb-helpers.sh runs under bash (not zsh).
-cat > "$INSTALL_DIR/pd" << 'PDEOF'
-#!/bin/bash
-exec /bin/bash "$(dirname "$0")/scripts/adb-helpers.sh" "$@"
-PDEOF
-chmod +x "$INSTALL_DIR/pd"
+chmod +x "$INSTALL_DIR/scripts/pd"
 
 echo ""
 echo "[ok] Scripts installed"
 echo "[ok] Command installed"
-echo "[ok] Runner installed at $INSTALL_DIR/pd"
 [ -f "$INSTALL_DIR/memory.json" ] && echo "[ok] Memory ready (existing skills preserved)"
 
 # ── Verify ─────────────────────────────────────────────────────────────

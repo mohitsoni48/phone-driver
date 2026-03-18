@@ -1,0 +1,12 @@
+# Personal memory (never commit)
+.claude/commands/phonedriver-memory.json
+memory.json
+
+# Dev scratch
+WORKNOTES.md
+
+# OS files
+.DS_Store
+
+# OMC plugin cache
+.omc/

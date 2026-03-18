@@ -29,13 +29,17 @@ SCREENSHOT_DEFAULT="/tmp/phonedriver_screen.png"
 UIDUMP_PATH="/tmp/phonedriver_ui.xml"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PD_HOME="$HOME/.claude/phonedriver"
-# Memory file: prefer installed location, fall back to repo location
-if [ -f "$PD_HOME/memory.json" ]; then
-    MEMORY_FILE="$PD_HOME/memory.json"
-elif [ -f "$SCRIPT_DIR/../.claude/commands/phonedriver-memory.json" ]; then
-    MEMORY_FILE="$SCRIPT_DIR/../.claude/commands/phonedriver-memory.json"
-else
-    MEMORY_FILE="$PD_HOME/memory.json"
+MEMORY_FILE="$PD_HOME/memory.json"
+
+# Auto-seed memory on first run
+if [ ! -f "$MEMORY_FILE" ]; then
+    mkdir -p "$PD_HOME"
+    local_seed="$SCRIPT_DIR/../memory-seed.json"
+    if [ -f "$local_seed" ]; then
+        cp "$local_seed" "$MEMORY_FILE"
+    else
+        echo '{"schema_version":2,"devices":{},"apps":{},"tasks":{},"settings_paths":{}}' > "$MEMORY_FILE"
+    fi
 fi
 MEMORY_TREE="$SCRIPT_DIR/memory-tree.py"
 
