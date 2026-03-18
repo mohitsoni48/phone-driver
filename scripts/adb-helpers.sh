@@ -29,8 +29,6 @@ SCREENSHOT_DEFAULT="/tmp/phonedriver_screen.png"
 UIDUMP_PATH="/tmp/phonedriver_ui.xml"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PD_HOME="$HOME/.claude/phonedriver"
-DEVICE_SESSION_FILE="/tmp/phonedriver_device_session"
-
 # Memory file: prefer installed location, fall back to repo location
 if [ -f "$PD_HOME/memory.json" ]; then
     MEMORY_FILE="$PD_HOME/memory.json"
@@ -41,6 +39,12 @@ else
 fi
 MEMORY_TREE="$SCRIPT_DIR/memory-tree.py"
 
+# Device lock file is scoped per memory file path, so different projects
+# (each with their own memory.json) get independent device locks.
+# This prevents one Claude session overwriting another's device selection.
+_PD_LOCK_HASH=$(echo "$MEMORY_FILE" | md5 2>/dev/null || echo "$MEMORY_FILE" | md5sum 2>/dev/null | cut -c1-12 || echo "default")
+DEVICE_SESSION_FILE="/tmp/phonedriver_device_${_PD_LOCK_HASH}"
+
 # Device session: if locked, all commands target that device
 _LOCKED_DEVICE=""
 if [ -f "$DEVICE_SESSION_FILE" ]; then
@@ -48,11 +52,13 @@ if [ -f "$DEVICE_SESSION_FILE" ]; then
 fi
 
 # ADB wrapper that handles device targeting with proper quoting
+# REQUIRES a locked device — fails if no lock file exists
 adb_cmd() {
     if [ -n "$_LOCKED_DEVICE" ]; then
         "$ADB" -s "$_LOCKED_DEVICE" "$@"
     else
-        "$ADB" "$@"
+        echo "ERROR: No device locked. Run 'pd check' first to select a device." >&2
+        return 1
     fi
 }
 
@@ -377,10 +383,25 @@ sys.exit(1)
             # Intent is like 'adb shell am start -n ...' — strip 'adb shell ' and run via adb_cmd
             local shell_cmd
             shell_cmd=$(echo "$intent" | sed 's/^adb shell //')
+            # Add clear-task flag to always start fresh (not resume a sub-screen)
+            if echo "$shell_cmd" | grep -q "am start"; then
+                shell_cmd="$shell_cmd --activity-clear-task"
+            fi
             adb_cmd shell $shell_cmd 2>/dev/null
             local rc=$?
             if [ $rc -eq 0 ]; then
-                echo "LAUNCHED: $keyword (from memory)"
+                # Dismiss Leak Canary if it intercepted the launch
+                sleep 0.5
+                local current_focus
+                current_focus=$(adb_cmd shell dumpsys window 2>/dev/null | grep -i "mCurrentFocus" || true)
+                if echo "$current_focus" | grep -qi "leakcanary\|LeakActivity"; then
+                    adb_cmd shell input keyevent KEYCODE_BACK 2>/dev/null
+                    sleep 0.5
+                    adb_cmd shell $shell_cmd 2>/dev/null
+                    echo "LAUNCHED: $keyword (dismissed LeakCanary)"
+                else
+                    echo "LAUNCHED: $keyword (from memory)"
+                fi
                 return 0
             else
                 echo "MEMORY_STALE: Intent failed, discovering fresh..."
@@ -708,7 +729,7 @@ batch_actions() {
                 launch_target=$(echo "$cmd" | sed "s/^launch //" | sed "s/^'//;s/'$//")
                 # If it looks like a component (has /), use am start directly
                 if echo "$launch_target" | grep -q "/"; then
-                    adb_cmd shell am start -n "$launch_target" 2>/dev/null
+                    adb_cmd shell am start -n "$launch_target" --activity-clear-task 2>/dev/null
                 else
                     launch_app "$launch_target"
                 fi
@@ -745,7 +766,7 @@ batch_actions() {
                     # Quick UI dump check (suppress errors)
                     adb_cmd shell uiautomator dump /sdcard/phonedriver_waitfor.xml > /dev/null 2>&1
                     local found=""
-                    found=$(adb_cmd shell "cat /sdcard/phonedriver_waitfor.xml 2>/dev/null | grep -o 'text=\"[^\"]*${target}[^\"]*\"' || grep -o 'resource-id=\"[^\"]*${target}[^\"]*\"' /sdcard/phonedriver_waitfor.xml 2>/dev/null" 2>/dev/null || true)
+                    found=$(adb_cmd shell "cat /sdcard/phonedriver_waitfor.xml 2>/dev/null | grep -oE 'text=\"[^\"]*${target}[^\"]*\"|content-desc=\"[^\"]*${target}[^\"]*\"|resource-id=\"[^\"]*${target}[^\"]*\"'" 2>/dev/null || true)
                     adb_cmd shell rm /sdcard/phonedriver_waitfor.xml 2>/dev/null
                     if [ -n "$found" ]; then
                         echo "WAITFOR_OK: Found '$target' after ${elapsed}s"
@@ -756,6 +777,54 @@ batch_actions() {
                 done
                 if [ "$elapsed" -ge "$timeout_s" ]; then
                     echo "WAITFOR_TIMEOUT: '$target' not found after ${timeout_s}s, continuing anyway"
+                fi
+                ;;
+            scrolltap)
+                # scrolltap <element_text> [max_scrolls]
+                # Scrolls down in a list until an EXACT text match is found, then taps it.
+                # Useful for alphabetical/scrollable lists where the element may be off-screen.
+                local st_query st_max st_attempt st_found
+                st_query=$(echo "$cmd" | sed 's/^scrolltap //' | sed 's/ [0-9]*$//')
+                st_max=$(echo "$cmd" | awk '{print $NF}')
+                if ! echo "$st_max" | grep -qE '^[0-9]+$'; then
+                    st_max=5
+                fi
+                st_found=0
+                for st_attempt in $(seq 0 "$st_max"); do
+                    # Dump and search for exact match
+                    adb_cmd shell uiautomator dump /sdcard/phonedriver_st.xml > /dev/null 2>&1
+                    adb_cmd pull /sdcard/phonedriver_st.xml /tmp/phonedriver_st.xml > /dev/null 2>&1
+                    adb_cmd shell rm /sdcard/phonedriver_st.xml 2>/dev/null
+                    if [ -f /tmp/phonedriver_st.xml ]; then
+                        local st_result
+                        st_result=$(python3 "$MEMORY_TREE" find-and-tap /tmp/phonedriver_st.xml "$st_query" 0 2>&1) || true
+                        if echo "$st_result" | grep -q "^TAPPED:"; then
+                            # Check it's an exact match, not partial
+                            if echo "$st_result" | grep -q "(partial)"; then
+                                # Partial match — need to keep scrolling for exact
+                                :
+                            else
+                                echo "$st_result" | grep -v "^TAP_COORDS:"
+                                local st_coords
+                                st_coords=$(echo "$st_result" | grep "^TAP_COORDS:" | sed 's/TAP_COORDS: //')
+                                local st_tx st_ty
+                                st_tx=$(echo "$st_coords" | awk '{print $1}')
+                                st_ty=$(echo "$st_coords" | awk '{print $2}')
+                                adb_cmd shell input tap "$st_tx" "$st_ty"
+                                st_found=1
+                                echo "SCROLLTAP_OK: Found and tapped '$st_query' after $st_attempt scroll(s)"
+                                break
+                            fi
+                        fi
+                    fi
+                    if [ "$st_attempt" -lt "$st_max" ]; then
+                        # Scroll down
+                        adb_cmd shell input swipe 540 1800 540 1300 300
+                        sleep 0.5
+                    fi
+                done
+                if [ "$st_found" -eq 0 ]; then
+                    echo "SCROLLTAP_FAIL: '$st_query' not found after $st_max scrolls"
                 fi
                 ;;
             *)

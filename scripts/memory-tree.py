@@ -602,7 +602,8 @@ def cmd_find_and_tap(xml_path, query, index=0):
     root = tree.getroot()
     query_lower = query.lower()
     index = int(index)
-    matches = []
+    exact_matches = []
+    partial_matches = []
 
     for node in root.iter("node"):
         text = node.get("text", "")
@@ -619,25 +620,23 @@ def cmd_find_and_tap(xml_path, query, index=0):
 
         cx, cy = bounds_center(bounds)
 
-        matched = False
-        match_on = ""
-        # Exact matches
+        # Exact matches (highest priority)
         if text.lower() == query_lower:
-            matched, match_on = True, f'text="{text}"'
+            exact_matches.append((cx, cy, f'text="{text}"', bounds_str, text))
         elif desc.lower() == query_lower:
-            matched, match_on = True, f'content-desc="{desc}"'
+            exact_matches.append((cx, cy, f'content-desc="{desc}"', bounds_str, desc))
         elif rid.lower() == query_lower or rid.lower().endswith("/" + query_lower) or rid.lower().endswith(":id/" + query_lower):
-            matched, match_on = True, f'resource-id="{rid}"'
-        # Partial matches
+            exact_matches.append((cx, cy, f'resource-id="{rid}"', bounds_str, rid))
+        # Partial matches (fallback)
         elif query_lower in text.lower():
-            matched, match_on = True, f'text="{text}" (partial)'
+            partial_matches.append((cx, cy, f'text="{text}" (partial)', bounds_str, text))
         elif query_lower in desc.lower():
-            matched, match_on = True, f'content-desc="{desc}" (partial)'
+            partial_matches.append((cx, cy, f'content-desc="{desc}" (partial)', bounds_str, desc))
         elif query_lower in rid.lower():
-            matched, match_on = True, f'resource-id="{rid}" (partial)'
+            partial_matches.append((cx, cy, f'resource-id="{rid}" (partial)', bounds_str, rid))
 
-        if matched:
-            matches.append((cx, cy, match_on, bounds_str, text or desc or rid))
+    # Prefer exact matches; only fall back to partial if no exact match
+    matches = exact_matches if exact_matches else partial_matches
 
     if not matches:
         print(f'NOT_FOUND: No element matching "{query}"')
@@ -828,11 +827,94 @@ def cmd_get_task(task_id, device_key):
     print(json.dumps(result))
 
 
+def _resolve_element_across_screens(app_data, screen_name, element_name, device_key=None):
+    """
+    Resolve an element's screen and data, searching across all screens if needed.
+    Returns (resolved_screen_name, element_data) or (None, None) if not found.
+
+    Strategy:
+    1. Direct lookup by exact screen name — but only if it has bounds (when device_key given)
+    2. If not usable, search all screens for the element name
+    3. Prefer screens that have bounds for this device
+    """
+    screens = app_data.get("screens", {})
+
+    # Direct lookup first
+    screen = screens.get(screen_name, {})
+    element = screen.get("elements", {}).get(element_name, {})
+    if element:
+        bounds = element.get("bounds_by_device", {})
+        # Accept if: specific device bounds exist, OR no device_key and has ANY bounds
+        if device_key and device_key in bounds:
+            return screen_name, element
+        elif not device_key and bounds:
+            return screen_name, element
+        # Element exists but has no (usable) bounds — fall through to search
+
+    # Fallback: search all screens for this element
+    candidates = []
+    for sname, sdata in screens.items():
+        el = sdata.get("elements", {}).get(element_name, {})
+        if el:
+            candidates.append((sname, el))
+
+    if not candidates:
+        return None, None
+
+    # Prefer screens with bounds for this device (or any bounds if no device_key)
+    if device_key:
+        for sname, el in candidates:
+            if device_key in el.get("bounds_by_device", {}):
+                return sname, el
+    else:
+        for sname, el in candidates:
+            if el.get("bounds_by_device"):
+                return sname, el
+
+    if len(candidates) == 1:
+        return candidates[0]
+
+    # Return first match as fallback
+    return candidates[0]
+
+
 def cmd_save_task(task_id, task_json):
     data = load_memory()
     task_data = json.loads(task_json)
     if "tasks" not in data:
         data["tasks"] = {}
+
+    # Resolve screen names: if a step references a screen that doesn't exist
+    # in memory but the element exists in another screen, fix the reference
+    app_name = task_data.get("app", "")
+    app_data = data.get("apps", {}).get(app_name, {})
+    if app_data:
+        resolved_count = 0
+        for step in task_data.get("steps", []):
+            if step.get("action") in ("tap", "tap_repeat"):
+                screen_name = step.get("screen", "")
+                element_name = step.get("element", "")
+                if not screen_name or not element_name:
+                    continue
+
+                screens = app_data.get("screens", {})
+                # Check if the screen exists and has this element WITH bounds
+                screen = screens.get(screen_name, {})
+                el = screen.get("elements", {}).get(element_name, {})
+                if el and el.get("bounds_by_device"):
+                    continue  # Already correct with bounds
+
+                # Try to resolve: find a screen that has this element with bounds
+                resolved_screen, resolved_el = _resolve_element_across_screens(
+                    app_data, screen_name, element_name
+                )
+                if resolved_screen and resolved_screen != screen_name:
+                    step["screen"] = resolved_screen
+                    resolved_count += 1
+
+        if resolved_count:
+            print(f"RESOLVED: {resolved_count} screen name(s) auto-corrected")
+
     data["tasks"][task_id] = task_data
     save_memory(data)
     print(f"OK: Saved task '{task_id}'")
@@ -847,8 +929,12 @@ def _get_wait_target(data, steps, step_index, app_name):
             el_name = ns.get("element", "")
             target_app = ns.get("app", app_name)
             app_data = data.get("apps", {}).get(target_app, {})
-            screen = app_data.get("screens", {}).get(scr_name, {})
-            element = screen.get("elements", {}).get(el_name, {})
+            # Use cross-screen resolution fallback
+            _, element = _resolve_element_across_screens(
+                app_data, scr_name, el_name
+            )
+            if not element:
+                element = {}
             # Prefer resource_id, then text, then content_desc
             rid = element.get("resource_id", "")
             if rid:
@@ -900,22 +986,31 @@ def cmd_compile_task(task_id, device_key):
             screen_name = step.get("screen", "")
             element_name = step.get("element", "")
             app_data = data.get("apps", {}).get(step_app, {})
-            screens = app_data.get("screens", {})
-            screen = screens.get(screen_name, {})
-            element = screen.get("elements", {}).get(element_name, {})
+            # Use cross-screen resolution fallback
+            _, element = _resolve_element_across_screens(
+                app_data, screen_name, element_name, device_key
+            )
+            if not element:
+                element = {}
+            # Prefer text-based tap (resilient to layout changes) over coordinates.
+            # batchact's "tap <text>" does a UI dump + finds element, so it
+            # works even when the screen scrolls or reflows.
+            tap_label = (element.get("text") or element.get("content_desc") or "").strip()
             bounds = element.get("bounds_by_device", {}).get(device_key)
-            if bounds:
+            if tap_label:
+                commands.append(f"scrolltap {tap_label}")
+            elif bounds:
                 cx, cy = bounds_center(bounds)
                 commands.append(f"tap {cx} {cy}")
-                # Wait for next step's target element
-                wait_target = _get_wait_target(data, steps, i, step_app)
-                if wait_target:
-                    commands.append(f"waitfor {wait_target} 8")
-                else:
-                    commands.append("sleep 1")
             else:
-                print(f"INCOMPLETE: No bounds for element '{element_name}' on device '{device_key}'")
+                print(f"INCOMPLETE: No label or bounds for element '{element_name}' on device '{device_key}'")
                 return
+            # Wait for next step's target element
+            wait_target = _get_wait_target(data, steps, i, step_app)
+            if wait_target:
+                commands.append(f"waitfor {wait_target} 8")
+            else:
+                commands.append("sleep 1")
         elif action == "type":
             text = step.get("text", "")
             commands.append(f"text '{text}'")
@@ -931,9 +1026,12 @@ def cmd_compile_task(task_id, device_key):
             element_name = step.get("element", "")
             repeat_raw = step.get("repeat", "1")
             app_data = data.get("apps", {}).get(step_app, {})
-            screens = app_data.get("screens", {})
-            screen = screens.get(screen_name, {})
-            element = screen.get("elements", {}).get(element_name, {})
+            # Use cross-screen resolution fallback
+            _, element = _resolve_element_across_screens(
+                app_data, screen_name, element_name, device_key
+            )
+            if not element:
+                element = {}
             bounds = element.get("bounds_by_device", {}).get(device_key)
             if bounds:
                 cx, cy = bounds_center(bounds)
