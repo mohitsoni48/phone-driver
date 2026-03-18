@@ -1,15 +1,11 @@
 # Phone Driver
 
-An AI-powered Claude Code skill that automates Android devices. Describe a task in natural language and Claude will execute it — learning from each interaction to replay tasks instantly next time.
-
-<p align="center">
-  <img src="Images/PhoneDriver.png" width="600" alt="Phone Driver Demo">
-</p>
+AI-powered Claude Code plugin that automates Android devices. Describe a task in natural language and Claude executes it — learning from each interaction to replay tasks instantly next time.
 
 ## Features
 
 - **Zero dependencies** — No Python ML libraries, no GPU, no model downloads. Just ADB + Claude Code.
-- **Skill learning** — First time discovering, every time after instant replay
+- **Skill learning** — First run discovers, every run after is instant replay
 - **Tree-structured memory** — Learns app screens, element locations, and task recipes
 - **Multi-device support** — Same skills work across devices, coordinates adapt per device
 - **Natural language** — Describe what you want, Claude figures out how
@@ -17,7 +13,13 @@ An AI-powered Claude Code skill that automates Android devices. Describe a task 
 
 ## Install
 
-### One-line installer (recommended)
+### As a Claude Code plugin
+
+```bash
+/plugin install phone-driver
+```
+
+### Standalone (curl)
 
 ```bash
 curl -sL https://raw.githubusercontent.com/mohitsoni48/phone-driver/main/install.sh | bash
@@ -27,18 +29,8 @@ curl -sL https://raw.githubusercontent.com/mohitsoni48/phone-driver/main/install
 
 ```bash
 git clone https://github.com/mohitsoni48/phone-driver.git
-cd PhoneDriver
+cd phone-driver
 ./install.sh
-```
-
-### What gets installed
-
-```
-~/.claude/commands/phone-driver.md     ← The skill (Claude Code command)
-~/.claude/phonedriver/
-├── scripts/adb-helpers.sh             ← ADB helpers + batch actions
-├── scripts/memory-tree.py             ← Skill tree operations
-└── memory.json                        ← Learned skills (persists across updates)
 ```
 
 ## Prerequisites
@@ -62,7 +54,7 @@ sudo apt install adb
 
 ### Connect your device
 
-1. Enable USB debugging: **Settings → Developer Options → USB Debugging**
+1. Enable USB debugging: **Settings > Developer Options > USB Debugging**
 2. Connect via USB
 3. Verify: `adb devices` (should show your device as `device`)
 
@@ -80,21 +72,35 @@ In Claude Code:
 ### How it works
 
 **First time** (Learn Mode):
-1. Launches app via intent (instant)
+1. Launches app via intent
 2. Discovers screens and elements via UI dump
 3. Executes actions (tap, type, swipe)
-4. Saves everything to the skill tree
-5. Compiles task recipe for instant replay
+4. Auto-memoizes every screen and element with bounds
+5. Saves task and compiles for instant replay
 
 **Second time** (Replay Mode):
-1. Reads skill library → finds matching task
+1. Reads skill library, finds matching task
 2. Executes entire sequence in ONE batch call
 3. No UI dumps, no screenshots, no trial and error
 
 **Partial match**:
-If you ask "search for weather in Chrome and click first result" and it only knows "search for weather in Chrome", it replays the known prefix and only discovers the new "click first result" part.
+If you ask "search for weather in Chrome and click first result" and it only knows "search in Chrome", it replays the known prefix and discovers the rest.
 
-## How the skill tree works
+## Architecture
+
+```
+phone-driver/
+├── .claude-plugin/plugin.json    ← Plugin manifest
+├── commands/phone-driver.md      ← The skill prompt
+├── scripts/
+│   ├── pd                        ← Entry point
+│   ├── adb-helpers.sh            ← ADB helpers, batch actions, memory dispatch
+│   └── memory-tree.py            ← Tree ops, task matching, compilation
+├── memory-seed.json              ← Initial memory with common apps
+└── install.sh                    ← Standalone installer
+```
+
+### Skill tree
 
 PhoneDriver builds a tree of everything it learns:
 
@@ -103,23 +109,31 @@ Apps
 ├── chrome (package, intent, aliases)
 │   └── Screens
 │       ├── home → elements: [search_bar, menu_button]
-│       ├── search_input → elements: [url_bar_focused]
 │       └── search_results → elements: [first_result]
 │
 Tasks (replayable recipes)
 ├── search_in_chrome: "search for {query} in chrome"
-│   steps: launch → tap search_bar → type {query} → press ENTER
-│   compiled: "launch chrome; waitfor search_box 10; tap 540 188; ..."
+│   compiled: "launch chrome; waitfor search_box 10; scrolltap Search; ..."
 │
 Settings Shortcuts
 ├── wifi → android.settings.WIFI_SETTINGS
-├── bluetooth → android.settings.BLUETOOTH_SETTINGS
-└── ...
+└── bluetooth → android.settings.BLUETOOTH_SETTINGS
 ```
 
-- **Element locations** are stored per-device (same skill works on any phone)
-- **Tasks** are parameterized (e.g., `{query}` → reusable with any search term)
-- **Memory persists** across updates (install won't overwrite learned skills)
+- **Element locations** stored per-device (same skill works on any phone)
+- **Tasks** are parameterized (`{query}` → reusable with any search term)
+- **Memory persists** across updates (install never overwrites learned skills)
+
+### Key commands
+
+| Command | What it does |
+|---------|-------------|
+| `scrolltap <text>` | Scroll until exact match found, then tap |
+| `waitfor <text> <timeout>` | Poll UI until element appears |
+| `batchact "<commands>"` | Execute a compiled task sequence |
+| `tap-on "<element>"` | Find element by text/desc/rid and tap |
+| `find-elements` | List all UI elements on screen |
+| `snapshot-screen <app> <name>` | Save all elements to memory |
 
 ## Uninstall
 
@@ -130,10 +144,4 @@ rm -rf ~/.claude/phonedriver
 
 ## License
 
-Apache License 2.0 — see [LICENSE](LICENSE) file for details.
-
-## Acknowledgments
-
-- Powered by [Claude Code](https://claude.ai/code) by Anthropic
-- Uses [ADB](https://developer.android.com/tools/adb) for device communication
-- Original vision model concept inspired by [Qwen3-VL](https://github.com/QwenLM/Qwen-VL)
+Apache License 2.0 — see [LICENSE](LICENSE) file.
