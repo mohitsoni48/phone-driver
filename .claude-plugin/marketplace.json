@@ -7,8 +7,8 @@
     {
       "name": "phone-driver",
       "source": {
-        "source": "github",
-        "repo": "mohitsoni48/phone-driver"
+        "source": "git",
+        "url": "https://github.com/mohitsoni48/phone-driver.git"
       },
       "description": "AI-powered Android device automation via ADB with skill memory and instant task replay",
       "version": "1.0.0",

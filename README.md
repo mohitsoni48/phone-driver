@@ -17,7 +17,7 @@ AI-powered Claude Code plugin that automates Android devices. Describe a task in
 
 ```bash
 # Add the marketplace (one-time)
-/plugin marketplace add mohitsoni48/phone-driver
+/plugin marketplace add https://github.com/mohitsoni48/phone-driver.git
 
 # Install
 /plugin install phone-driver@phone-driver-marketplace
