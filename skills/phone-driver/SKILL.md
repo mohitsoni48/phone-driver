@@ -1,279 +1,176 @@
 ---
 name: phone-driver
-description: Control an Android device using visual understanding and ADB. Captures screenshots, analyzes them, and performs actions.
-argument-hint: <task description, e.g. "open Chrome and search for weather">
+description: Control an Android device. Launches apps, taps elements by resource-id/text/content-desc, types text, scrolls, with a memory of reusable recipes. Built on the `android` CLI (structured layout JSON) + `adb shell input`.
+argument-hint: <task description, e.g. "open Settings and search for battery">
 allowed-tools: Bash, Read
 ---
 
-# Phone Driver — Mobile Automation via ADB
+# Phone Driver
 
-You are a mobile device automation agent. You control an Android phone via ADB. You have a **skill library** of learned tasks, app screens, and element locations. You should reuse known skills whenever possible and learn new ones.
+Automate an Android device. You have a **recipe memory**: reusable task macros keyed by natural-language pattern. Reuse when you can, learn new recipes when you can't.
 
-**YOU MUST RUN AUTONOMOUSLY.** Execute the task end-to-end without asking the user for confirmation at each step. Only surface to the user:
-- Final results ("Task complete: opened Chrome and searched for weather")
-- Blocking questions that require human input ("Multiple devices found — which one?")
-- Errors that you cannot recover from
+**RUN AUTONOMOUSLY.** Don't ask "should I proceed?" — just execute. Surface to the user only: final results, blocking questions (e.g. multiple devices, payment confirmation), or unrecoverable errors.
 
-Do NOT ask "Should I proceed?" or "Is this correct?" — just do it. If something goes wrong, try alternatives before reporting failure.
+Task: $ARGUMENTS
 
-The user's task is: $ARGUMENTS
+## Rules
 
-## CRITICAL RULES
+1. **All commands go through `pd`** (defined in Phase 0). Never call `adb` or `android` directly.
+2. **Tap by selector, not coordinates.** Use `pd tap "<selector>"`. Selectors: `rid:<resource_id>`, `text:<substring>`, `desc:<substring>`, or a bare string (tries all three).
+3. **Launch by name.** `pd launch <app>`. Use `pd save-app <name> <package>` to teach new apps.
+4. **Read recipes first.** Reuse any that match the task or a prefix of it.
+5. **Save every new multi-step task** as a recipe so next time is one command.
+6. **Minimize tool calls.** Chain with `&&`. Target ≤1 Bash call per cycle.
 
-1. **ALL commands go through `pd`** (function set in Phase 0). Never call bare `adb`.
-2. **To tap ANY element, use `pd tap-on "<element text>"`** — NEVER calculate coordinates yourself.
-3. **To open ANY app, use `pd launch <name>`** — never visually search for apps.
-4. **Read your skill library FIRST** — decompose the task and reuse known skills.
-5. **Save every new skill** so it can be replayed next time.
-6. **Minimize tool calls.** Chain with `&&`. Target 1 Bash call per cycle.
-7. **Run autonomously** — only ask the user when truly blocked.
+## Phase 0: setup
 
-## Phase 0: Setup + Device Selection + Load Skills
-
-**Run this FIRST.** Defines the `pd` function and loads everything:
+Run this first:
 
 ```bash
-pd() { /bin/bash "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/phonedriver}/scripts/pd" "$@"; } && pd check && echo "=== Resolution ===" && pd resolution && echo "=== DeviceKey ===" && pd devicekey && echo "=== Skills ===" && pd memory list-skills $(pd devicekey)
+pd() { /bin/bash "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/phonedriver}/scripts/pd" "$@"; } && pd check && pd recipes && pd apps
 ```
 
-If it says `not found` or `No such file` — tell the user to install first:
+- `NO_DEVICE:` → tell user to plug in a device, stop.
+- `MULTIPLE_DEVICES:` → ask user which serial, then `pd select <serial>`.
+- Otherwise a device is auto-locked for the session.
+
+If `pd: not found`, tell user to install:
 ```
 curl -sL https://raw.githubusercontent.com/mohitsoni48/phone-driver/main/install.sh | bash
 ```
 
-After this, use `pd` (the function) for ALL commands. Example: `pd tap-on "Settings"`, `pd launch chrome`, `pd find-elements`.
+## Phase 1: plan
 
-### Device Selection Rules
+Decompose the task. For each sub-step, decide:
+- **Exact recipe match?** → `pd run <name> key=value ...`
+- **Prefix match?** → run recipe, continue from its end state
+- **No match?** → discover via `pd layout`, then save a new recipe when done
 
-The `check` command handles device selection automatically:
+## Phase 2: execute
 
-- **0 devices** → Output starts with `NO_DEVICE:`. **STOP and tell the user** to connect a device. Do not proceed.
-- **1 device** → Automatically locked for the session. All commands target this device only.
-- **2+ devices** → Output starts with `MULTIPLE_DEVICES:` with a numbered list. **Ask the user which device to use**, then lock it:
-  ```bash
-  pd select-device <device_id>
-  ```
-  After selection, re-run the skills load.
+### Inspect the screen
+```bash
+pd layout                          # full JSON of visible UI elements (compact)
+pd layout --filter=rid:eq          # only elements matching this selector (keeps context tight)
+pd layout --filter=text:settings
+```
 
-Once a device is locked, ALL subsequent ADB commands automatically target that device — even if other devices are connected or disconnected during the session. The lock persists until `pd release-device` is called.
+Each element shows `text`, `rid` (resourceId), `desc` (contentDesc), `center`, `bounds`, `i` (interactions), `s` (state).
 
-Note the **device key** (format: `Model__WIDTHxHEIGHT`) for memory operations.
+### Interact
+```bash
+pd launch settings                     # launch known app by name
+pd tap "rid:search_src_text"           # tap by resource-id
+pd tap "text:Wi-Fi"                    # tap by text substring
+pd tap "desc:Back"                     # tap by content-description
+pd tap "Battery"                       # bare: tries rid→text→desc
+pd type "hello world"                  # adb input text (spaces auto-escaped)
+pd key KEYCODE_ENTER                   # any adb keycode
+pd back                                # shortcut
+pd home                                # shortcut
+pd enter                               # shortcut
+pd swipe 540 1600 540 400 400          # swipe up (scroll down), 400ms
+pd wait "rid:search_src_text" 10       # poll layout up to 10s until selector matches
+pd wait "Loading" 5 --gone             # wait until selector disappears
+```
 
-## Phase 1: Decompose and Plan
+### Recipe replay
+```bash
+pd run settings_search query=battery
+```
 
-Read the skill library. Decompose the task and decide which parts you already know:
+### Visual fallback (WebViews, games, canvas)
+Only when `pd layout` is empty or the element has no text/rid/desc:
+```bash
+pd annotate                            # saves annotated PNG, prints path
+# Read the PNG, pick a numbered region, then:
+pd tap-visual "#34"                    # capture+resolve+tap in one call
+# or manually:
+pd resolve /path/annot.png "tap #34"   # prints "tap X Y" — pipe to adb if wanted
+```
 
-1. Exact known task? → Replay it
-2. Known task covers the first part? → Replay prefix, discover the rest
-3. Know the app's screens/elements? → Use `tap-on` directly
-4. Completely new? → Discover with `find-elements`, save what you learn
+### Save a new app
+```bash
+pd save-app whatsapp com.whatsapp
+pd save-app myapp com.example.myapp com.example.myapp.MainActivity   # with activity
+```
 
-### Executing a Known Task
+## Phase 3: save the recipe
+
+After completing a new multi-step task, save it. Use `{param}` placeholders for anything the user supplied (search queries, names, counts):
 
 ```bash
-pd memory get-replay <task_id> <device_key> param1=value1
-```
-
-If `REPLAY:` → pass **exactly as-is** to batchact:
-```bash
-pd batchact "<exact_string_after_REPLAY:>"
-```
-
-If `NO_COMPILED` → compile first: `pd memory compile-task <task_id> <device_key>`
-
-## Phase 2: Discover Unknown Steps
-
-For steps NOT covered by existing skills. Max 15 cycles.
-
-### Tapping Elements — USE THESE COMMANDS, NEVER CALCULATE COORDINATES
-
-**Tap by element text, content-desc, or resource-id** (the script does the UI dump, finds the element, computes center, and taps — all in one call):
-```bash
-pd tap-on "Settings"
-pd tap-on "Search or type URL"
-pd tap-on "menu_button"
-pd tap-on "com.android.chrome:id/search_box_text"
-```
-
-The output tells you exactly what was tapped:
-```
-TAPPED: 540 188 (text="Settings") bounds=[0,144,1080,232]
-```
-
-If the element isn't found, it shows available elements:
-```
-NOT_FOUND: No element matching "foo"
-HINT: Available elements: Settings, Chrome, Camera, ...
-```
-
-**To see all elements on screen** (useful when exploring a new screen):
-```bash
-pd find-elements
-```
-
-**To filter elements by keyword:**
-```bash
-pd find-elements "search"
-```
-
-Output shows each element with its center coordinates, attributes, and bounds:
-```
-  [540,188] text="Search or type URL" rid="com.android.chrome:id/search_box_text" clickable bounds=[0,144][1080,232]
-  [900,188] desc="Voice search" clickable bounds=[840,160][960,216]
-```
-
-**If tap-on can't find the element** (e.g., element has no text/desc/rid), ONLY THEN use `find-elements` to see what's available and tap by coordinates as last resort.
-
-### Launch App
-```bash
-pd launch "<app>" && sleep 1.5 && pd find-elements
-```
-
-### Save What You Learn (ONLY after verification)
-
-**NEVER save until you've VERIFIED the action worked.** The flow is:
-
-1. **Tap**: `pd tap-on "Watchlist"`
-2. **Verify**: Check the new screen (via `find-elements` or screenshot) — did the right screen appear?
-3. **If CORRECT** → snapshot the screen and save the transition:
-   ```bash
-   pd snapshot-screen <app> <new_screen_name> && pd memory save-transition <app> <old_screen> "tap <element>" <new_screen>
-   ```
-   `snapshot-screen` captures ALL elements on the current screen and saves them to memory with device-specific bounds — in one call.
-
-4. **If WRONG** → save a correction:
-   ```bash
-   pd memory save-correction <app> <screen> '{"wrong":"...","right":"...","reason":"..."}'
-   ```
-
-**`snapshot-screen` is the key command for memoization.** Call it every time you arrive at a new screen that you want to remember. It saves all visible elements with their bounds, so next time you can tap them directly without a UI dump.
-
-### Save Corrections (Learn from Mistakes)
-
-**After a WRONG tap or failed action**, save a correction so you never repeat it:
-```bash
-pd memory save-correction <app> <screen> '{"wrong":"<what you did wrong>","right":"<what to do instead>","reason":"<why it was wrong>"}'
-```
-
-**Examples:**
-```bash
-# Tapped the wrong "Search" — voice icon instead of text bar
-pd memory save-correction chrome home '{"wrong":"tap-on Search (matches voice search icon)","right":"tap-on Search or type URL (the text bar)","reason":"Multiple elements match Search — use the full text label"}'
-
-# Tapped a non-clickable area
-pd memory save-correction settings wifi_screen '{"wrong":"tap-on Wi-Fi text label","right":"tap-on the toggle switch to the right","reason":"The label text is not clickable, only the switch is"}'
-
-# Wrong screen appeared after tap
-pd memory save-correction chrome home '{"wrong":"tap-on menu_button expecting settings","right":"tap-on menu_button then look for Settings in dropdown","reason":"menu_button opens a popup menu, not settings directly"}'
-```
-
-**IMPORTANT**: The skill library shows corrections as warnings (⚠ AVOID). Always check these before acting on a screen — they tell you what NOT to do.
-
-Corrections save you from:
-- Tapping the wrong element when multiple have similar names
-- Tapping non-clickable elements
-- Expecting the wrong screen after a tap
-- Any action that failed and had to be corrected
-
-### Text Input
-```bash
-pd adb shell input text 'hello%sworld'
-```
-Spaces must be `%s`. Tap the input field first with `pd tap-on`.
-
-### Key Events
-```bash
-pd adb shell input keyevent KEYCODE_ENTER
-pd adb shell input keyevent KEYCODE_BACK
-```
-
-### Vision Fallback (Tier 3)
-Only if `tap-on` and `find-elements` return empty (games, canvas, webviews):
-```bash
-pd screenshot
-```
-Then: `Read /tmp/phonedriver_screen.png`
-
-### Step Tracking
-Track every step for saving later:
-```
-STEP_LOG:
-1. action=launch, app=chrome
-2. action=tap-on, element="Search or type URL", screen=home
-3. action=type, text={query}
-4. action=key, keycode=KEYCODE_ENTER
-```
-
-Parameterize dynamic values: "search for weather" → `text={query}`, note `query=weather`
-
-## Phase 3: Save New Skills
-
-After completing a task with new steps:
-
-```bash
-pd memory save-task "<task_id>" '{
-  "pattern": "<natural language with {params}>",
-  "pattern_aliases": ["<alternative phrasings>"],
-  "app": "<primary_app>",
-  "parameters": ["<param_names>"],
-  "steps": [<step objects>],
-  "commands_by_device": {},
-  "success_count": 1,
-  "last_used": "YYYY-MM-DD",
-  "created_at": "YYYY-MM-DD"
+pd save-recipe search_settings '{
+  "description": "Search Settings for {query}",
+  "params": ["query"],
+  "steps": [
+    {"op": "launch", "app": "settings"},
+    {"op": "wait", "selector": "rid:animated_hint_layout", "timeout": 10},
+    {"op": "tap",  "selector": "rid:animated_hint_layout"},
+    {"op": "wait", "selector": "rid:search_src_text", "timeout": 5},
+    {"op": "type", "value": "{query}"},
+    {"op": "enter"}
+  ]
 }'
 ```
 
-Compile for instant replay:
-```bash
-pd memory compile-task "<task_id>" "<device_key>"
+### Step ops
+| op | fields | purpose |
+|----|--------|---------|
+| `launch` | `app` | launch known app |
+| `tap` | `selector` | resolve selector live, tap center |
+| `type` | `value` | adb input text |
+| `key` | `value` | adb input keyevent (any KEYCODE_*) |
+| `wait` | `selector`, `timeout`?, `gone`? | poll until selector appears/disappears |
+| `swipe` | `x1,y1,x2,y2,ms`? | absolute swipe |
+| `sleep` | `seconds` | avoid if possible — prefer `wait` |
+| `back`/`home`/`enter` | — | key shortcuts |
+
+String fields support `{param}` interpolation from `pd run` args.
+
+### Naming
+- `recipe`: snake_case verb phrase. `search_settings`, `play_song_on_youtube`, `send_sms`.
+- Prefer `rid:` selectors over `text:` — more stable across locales.
+
+## Phase 4: report
+
+```
+Task: [summary]
+Mode: [replay | partial-replay+learn | learn]
+Recipes used: [list]
+Recipes saved: [list]
 ```
 
-Save device info:
-```bash
-pd memory save-device
-```
+## Safety
 
-**If this task EXTENDS an existing skill**, save as a NEW task with ALL steps.
+- **Never** tap payment confirm buttons without explicit user OK.
+- **Never** send messages or make calls unless that's the task.
+- On destructive confirmation dialogs: stop, surface to user.
 
-### Naming Conventions
+## Command reference
 
-- **task_id**: snake_case. E.g., `search_in_chrome`, `enable_wifi`
-- **screen names**: snake_case. E.g., `home`, `search_input`
-- **element names**: snake_case. E.g., `search_bar`, `wifi_toggle`
-
-### Completion Report
-
-```
-Task complete: [summary]
-Mode: [Replay/Partial Replay + Learn/Learn]
-Skills reused: [list]
-New skills saved: [list]
-```
-
-## Batch Action DSL Reference
-
-```bash
-pd batchact "launch chrome; waitfor search_box 10; tap Search; text 'hello'; key KEYCODE_ENTER"
-```
-
-| Command | What it does |
-|---------|-------------|
-| `launch <activity_or_name>` | Launch app via intent |
-| `tap <x> <y>` | Tap at coordinates (use only for compiled replays) |
-| `tap <element_text>` | Find element by text/desc/rid and tap its center |
-| `swipe <x1> <y1> <x2> <y2> <ms>` | Swipe gesture |
-| `text '<content>'` | Type text (spaces → `%s`) |
-| `key <KEYCODE>` | Press key |
-| `waitfor <text_or_rid> <timeout>` | Poll UI until element appears |
-| `sleep <secs>` | Wait (avoid — prefer `waitfor`) |
-| `intent <action>` | Launch settings/activity by intent action |
-
-**NEVER manually calculate coordinates.** Use `pd tap-on` or `tap <element_text>` in batchact.
-
-## Safety Rules
-
-- **NEVER** perform destructive actions unless explicitly requested.
-- **NEVER** interact with payment screens unless explicitly instructed.
-- **NEVER** send messages or make calls unless that is the explicit task.
-- If you encounter a destructive confirmation dialog, STOP and ask the user.
+| Command | Purpose |
+|---------|---------|
+| `pd check` | Device health + auto-lock |
+| `pd select <serial>` | Lock a specific device |
+| `pd release` | Release device lock |
+| `pd info` | Device fingerprint (serial, model, API, resolution) |
+| `pd layout [--filter=<sel>]` | Compact JSON of UI |
+| `pd tap <sel>` | Resolve selector and tap center |
+| `pd type <text>` | adb input text |
+| `pd key <KEYCODE>` | adb input keyevent |
+| `pd swipe x1 y1 x2 y2 [ms]` | adb input swipe |
+| `pd back` / `home` / `enter` | Key shortcuts |
+| `pd wait <sel> [sec] [--gone]` | Poll layout |
+| `pd launch <app>` | Launch known app |
+| `pd screenshot [path]` | Save PNG |
+| `pd annotate [path]` | Annotated PNG (numbered boxes) |
+| `pd resolve <png> <query>` | Substitute `#N` → coords |
+| `pd tap-visual <query>` | annotate → resolve → tap |
+| `pd run <recipe> [k=v...]` | Replay a recipe |
+| `pd save-recipe <name> <json>` | Save a recipe |
+| `pd recipes [-v]` | List recipes |
+| `pd recipe-get <name>` | Show one recipe |
+| `pd recipe-del <name>` | Delete a recipe |
+| `pd save-app <name> <package> [activity]` | Teach a new app |
+| `pd apps` | List known apps |

@@ -1,4 +1,6 @@
 #!/bin/bash
-# pd — wrapper for adb-helpers.sh that ensures bash execution
+# pd — Phone Driver CLI. Thin wrapper: forwards all args to driver.py.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-exec "$SCRIPT_DIR/adb-helpers.sh" "$@"
+PY="${PD_PYTHON:-python}"
+command -v "$PY" >/dev/null 2>&1 || PY=python3
+exec "$PY" "$SCRIPT_DIR/driver.py" "$@"

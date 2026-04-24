@@ -1,6 +1,6 @@
 {
   "name": "phone-driver",
-  "version": "1.0.0",
-  "description": "AI-powered Android device automation via ADB with skill memory and instant task replay",
+  "version": "2.0.0",
+  "description": "Android device automation via the `android` CLI (structured layout JSON) + ADB, with reusable device-agnostic recipes.",
   "skills": "./skills/"
 }
