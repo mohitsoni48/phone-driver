@@ -9,7 +9,7 @@
     {
       "name": "phone-driver",
       "description": "AI-powered Android device automation via ADB with skill memory and instant task replay",
-      "version": "1.0.0",
+      "version": "2.1.0",
       "author": {
         "name": "Mohit Soni"
       },
