@@ -1,6 +1,6 @@
 {
   "name": "phone-driver",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Android device automation via the `android` CLI (structured layout JSON) + ADB, with reusable device-agnostic recipes.",
   "skills": "./skills/"
 }
